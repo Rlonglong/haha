@@ -69,13 +69,26 @@ PROCESS.md 預設每個服務會有 `requirements_xx.in`，但 GitLab 為 Ruby/N
 - 本輪（v1.0 + v1.1）已涵蓋 CRITICAL、HIGH、MEDIUM、LOW 四個等級中「可直接升級解決」的全部項目。
 - 無法自行修補的項目（5 個框架層 gem、os 無上游修補套件如 busybox/util-linux 家族/glibc/tar/wget、node-pkg thrift CVE-2026-43870、cargo bytes/time、83 組 gobinary）已全部記錄在 `./vulnerability/gitlab_vulner_report.md`，附帶風險可接受理由與主動圍堵措施，不在本次 image 修補範圍，待 GitLab 官方下一版 release 後重新掃描確認。
 
+## v1.2 修正（依 v1 實際重新掃描結果發現並修正，詳見 `./report/gitlab_report_v1.md`）
+
+使用者在 `./report/gitlab_v1.txt` 提供了 v1.1 image 實際 build 後的 trivy 重新掃描結果，比對後發現：
+
+1. **OS（apt）與大部分 node-pkg（npm）修補確認生效**：libgnutls30t64、libsystemd0/libudev1、liblzma5、ini、json、npm、pug、yaml、thrift（部分）全部如預期清除。
+2. **`diff`、`handlebars` 需要再升版**：`diff` 3.5.0 仍被標記 CVE-2026-24001（實際修補門檻 `>= 3.5.1`，選版時少看一個 patch 版本），改為 5.2.2；`handlebars` 4.7.7 在 v1 掃描時被標記新公開的 CVE-2026-33937（CRITICAL，v0 掃描時尚未公開，非修補失敗），改為 4.7.9。
+3. **全部 15 個 gemspec 修補（含 net-imap）實際沒有清除**：根因是 `gem install -v <新版>` 在 RubyGems 屬於新增式安裝，不會移除舊版本，磁碟上新舊版本並存，trivy 直接掃實體 gemspec 檔案所以仍標記舊版；更嚴重的是 gitlab-rails 透過 `Gemfile.lock` 鎖定精確版本，Bundler 執行期可能仍載入舊版本，等同升級沒有真正在應用層生效。
+
+   修正為 `gem install`（裝新版） → `BUNDLE_GEMFILE=.../Gemfile bundle update --local --conservative <gems>`（更新 Gemfile.lock 鎖定版本，僅限本機已裝版本，不牽動其他套件） → `gem cleanup <gems>`（移除磁碟上不再被引用的舊版本檔案）三段式，已寫入 `Dockerfile.gitlab` v1.2。**此修正機制目前只能靠推理確認正確，本機 sandbox 無 docker/bundler/trivy 可驗證，需使用者在實機 build + rescan 後才能確認 gemspec 弱點是否真正清除、以及 gitlab-rails 是否能正常開機。**
+
 ## 待執行（需要實際 Docker/Trivy 環境）
 
 > 此 remote 容器內沒有可用的 docker daemon 與 trivy，以下指令需在有 Docker 與 Trivy 的環境中執行，目前僅提供 Dockerfile 與文件，尚未實際 build / rescan / 封裝：
 
 ```bash
-docker build -t dai/gitlab:v1.1 -f dockerfile/Dockerfile.gitlab .
-trivy image dai/gitlab:v1.1 > report/gitlab_v1.txt
-# 將 v1 掃描結果整理成 report/gitlab_report_v1.md，比對 CRITICAL/HIGH/MEDIUM/LOW 中標記「可修補」的項目是否已清除
-docker save dai/gitlab:v1.1 | gzip > images/gitlab_v1.1.tar.gz
+docker build -t dai/gitlab:v1.2 -f dockerfile/Dockerfile.gitlab .
+trivy image dai/gitlab:v1.2 > report/gitlab_v2.txt
+# 將 v2 掃描結果跟 report/gitlab_v1.txt 比對，重點確認：
+#   1) 15 個 gemspec 套件（含 net-imap）的舊版本 gemspec 是否真的從磁碟上消失
+#   2) gitlab-rails 服務是否能正常啟動（bundle update 改了 Gemfile.lock，需驗證沒有破壞相依關係）
+#   3) handlebars / diff 的新版本是否清除原本標記的 CVE
+docker save dai/gitlab:v1.2 | gzip > images/gitlab_v1.2.tar.gz
 ```

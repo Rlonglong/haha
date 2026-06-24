@@ -1,4 +1,4 @@
-# dai/gitlab:v1.1
+# dai/gitlab:v1.2
 # Base: gitlab/gitlab-ee:latest (ubuntu 24.04)
 #
 # v1.0 修補的 CRITICAL CVE（詳見 ./report/gitlab_report_v0.md 第一節）：
@@ -7,13 +7,23 @@
 #   - CVE-2026-42257 / CVE-2026-42258
 #     net-imap (gitlab-rails gem) 0.4.21 -> 0.6.4
 #
-# v1.1 新增：net-imap 修正版本（見下方說明）+ HIGH/MEDIUM/LOW 中可安全升級的項目
+# v1.1 新增：net-imap 修正版本 + HIGH/MEDIUM/LOW 中可安全升級的項目
 # （詳見 ./report/gitlab_report_v0.md 第二輪 HIGH/MEDIUM/LOW 段落、./report/gitlab_fix_v1.md）：
 #   - OS (apt)：libgcrypt20, libgnutls30t64, libsystemd0, libudev1, liblzma5
 #   - node-pkg (embedded npm 內部相依)：diff, ini, json, npm, pug, thrift(部分), yaml
 #   - gemspec (gitlab-rails 葉節點 gem)：addressable, aws-sdk-s3, concurrent-ruby,
 #     css_parser, doorkeeper-openid_connect, erb, excon, faraday, net-imap(0.6.4.1),
 #     nokogiri, oauth2, puma, sidekiq-cron, thor, view_component
+#
+# v1.2 修正（詳見 ./report/gitlab_report_v1.md，由 v1 重新掃描結果驗證發現）：
+#   - 根因：v1.1 的 gemspec 區塊只用 `gem install -v <新版>`，RubyGems 允許多版本並存、
+#     不會移除舊版，導致 Trivy 仍標記舊版 gemspec、且 gitlab-rails 透過 Gemfile.lock 鎖定的
+#     版本實際執行期可能仍是舊版本。改為 `gem install` + `bundle update --local --conservative`
+#     （只更新 Gemfile.lock 裡這幾個套件的鎖定版本，且不牽動其他未指定套件）+ `gem cleanup`
+#     （實體移除磁碟上不再被引用的舊版本檔案）三段式，net-imap 也納入同一段處理。
+#   - handlebars 4.7.7 -> 4.7.9：4.7.7 在 v1 掃描時新出現 CVE-2026-33937（CRITICAL，v0 掃描時尚未公開）。
+#   - diff 3.5.0 -> 5.2.2：3.5.0 仍被標記 CVE-2026-24001（LOW），實際修補門檻是 >= 3.5.1，
+#     直接拉高版本留緩衝。
 #
 # 無法在此層修補的項目（靜態編譯於官方 Go binary / OS 套件無上游修補 / 需框架版本同步升級）：
 #   詳見 ./vulnerability/gitlab_vulner_report.md（grpc-go、pgx/v5、busybox、util-linux 家族、
@@ -22,27 +32,19 @@
 
 FROM gitlab/gitlab-ee:latest
 
-# --- CVE-2026-42257 / CVE-2026-42258 / CVE-2026-47240 / CVE-2026-47242 / CVE-2026-47241: net-imap ---
-# gitlab-rails 內嵌的 net-imap gem 升級到 0.6.4.1（0.6.4 本身仍有 2 筆 MEDIUM 與 1 筆 LOW CVE 未修補，
-# 直接取上游目前最新修補版本一次處理完畢）。
-# net-imap 為葉節點 gem（僅供 "reply by email" / IMAP 功能使用），與 Rails 內部耦合度低，
-# 可安全地用 gem install 覆蓋既有版本而不需重新 bundle 整個 gitlab-rails。
-RUN /opt/gitlab/embedded/bin/gem install net-imap -v 0.6.4.1 \
-    --no-document \
-    --install-dir /opt/gitlab/embedded/lib/ruby/gems/3.3.0
-
-# --- CVE-2019-19919 / CVE-2021-23369 / CVE-2021-23383 + 其餘 handlebars HIGH/MEDIUM/NSWG 公告: ---
+# --- CVE-2019-19919 / CVE-2021-23369 / CVE-2021-23383 + 其餘 handlebars HIGH/MEDIUM/NSWG 公告 + CVE-2026-33937(CRITICAL,v1.2新增): ---
 # 受影響的 handlebars 是 omnibus 內嵌 npm 自身的內部相依套件（npm 用於資產建置工具鏈），
-# 並非 gitlab-rails 執行期相依，升級僅影響內嵌 npm 工具本身，風險低。4.7.7 同時涵蓋所有公告要求的修補版本。
-RUN /opt/gitlab/embedded/bin/npm install -g handlebars@4.7.7 \
+# 並非 gitlab-rails 執行期相依，升級僅影響內嵌 npm 工具本身，風險低。
+# v1.1 升級到 4.7.7 後，trivy 在 v1 重新掃描時標記出新公開的 CVE-2026-33937（CRITICAL），故 v1.2 改為 4.7.9。
+RUN /opt/gitlab/embedded/bin/npm install -g handlebars@4.7.9 \
     --prefix /opt/gitlab/embedded
 
 # --- 其餘 node-pkg HIGH/MEDIUM：diff / ini / json / npm / pug / thrift / yaml ---
 # 皆為 omnibus 內嵌 npm 工具鏈自身的內部相依套件（package.json target），非 gitlab-rails 執行期相依。
-# CVE-2026-24001 (diff, LOW) 由 3.5.0 一併涵蓋。
+# diff：v1.1 升級到 3.5.0 後 trivy 仍標記 CVE-2026-24001（LOW，實際修補門檻 >= 3.5.1），v1.2 拉高到 5.2.2 留緩衝。
 # thrift 僅 CVE-2026-41636 有修補版本（0.23.0），CVE-2026-43870 上游尚無修補版本，無法在此處理（見圍堵報告）。
 RUN /opt/gitlab/embedded/bin/npm install -g \
-        diff@3.5.0 \
+        diff@5.2.2 \
         ini@1.3.6 \
         json@10.0.0 \
         npm@6.14.6 \
@@ -51,13 +53,24 @@ RUN /opt/gitlab/embedded/bin/npm install -g \
         yaml@2.8.3 \
     --prefix /opt/gitlab/embedded
 
-# --- gitlab-rails 葉節點 gem：14 個可安全獨立升級的套件（非深層框架相依，無需同步升級 Rails 主版本） ---
+# --- gitlab-rails gem：net-imap + 14 個葉節點套件（v1.2 修正版） ---
+# v1.1 用 `gem install -v <新版>` 升級這些 gem，v1 重新掃描後發現 trivy 仍標記舊版本的 gemspec——
+# 根因是 RubyGems 允許同一個 gem 多版本並存於磁碟，gem install 只會新增、不會移除舊版本；
+# 而 gitlab-rails 透過 Gemfile.lock 鎖定精確版本，Bundler 執行期可能仍載入舊版本，等同升級沒有真正生效。
+# v1.2 修正為三段式：
+#   1) gem install 把新版本裝進本機 gem 目錄（沿用 v1.1 的版本號）。
+#   2) bundle update --local --conservative：只更新 Gemfile.lock 裡這幾個套件的鎖定版本到本機已裝的新版，
+#      --local 代表不連網（新版本已在上一步裝好），--conservative 限制不去動其他未指定的相依套件版本。
+#   3) gem cleanup：實體移除磁碟上不再被 Gemfile.lock 引用的舊版本檔案，讓 trivy 真正掃不到舊版 gemspec。
+#
+# CVE 對照：net-imap: CVE-2026-42257/42258(CRITICAL)/47240/47242(MEDIUM)/47241(LOW)
 # addressable: CVE-2026-35611 | aws-sdk-s3: CVE-2025-14762 | concurrent-ruby: CVE-2026-54904/54905/54906
 # css_parser: CVE-2026-44312 | doorkeeper-openid_connect: CVE-2026-44476 | erb: CVE-2026-41316
-# excon: CVE-2026-54171 | faraday: CVE-2026-54297/33637/25765 | net-imap: 已於上方處理
+# excon: CVE-2026-54171 | faraday: CVE-2026-54297/33637/25765
 # nokogiri: GHSA-5prr-v3j2-97mh + 7 筆 LOW GHSA | oauth2: GHSA-pp92-crg2-gfv9 | puma: CVE-2026-47736/47737
 # sidekiq-cron: CVE-2025-67202 | thor: CVE-2025-54314 | view_component: CVE-2026-44836/44837
 RUN /opt/gitlab/embedded/bin/gem install \
+        net-imap -v 0.6.4.1 \
         addressable -v 2.9.0 \
         aws-sdk-s3 -v 1.208.0 \
         concurrent-ruby -v 1.3.7 \
@@ -73,7 +86,40 @@ RUN /opt/gitlab/embedded/bin/gem install \
         thor -v 1.4.0 \
         view_component -v 3.25.0 \
     --no-document \
-    --install-dir /opt/gitlab/embedded/lib/ruby/gems/3.3.0
+    --install-dir /opt/gitlab/embedded/lib/ruby/gems/3.3.0 \
+ && BUNDLE_GEMFILE=/opt/gitlab/embedded/service/gitlab-rails/Gemfile \
+    /opt/gitlab/embedded/bin/bundle update --local --conservative \
+        net-imap \
+        addressable \
+        aws-sdk-s3 \
+        concurrent-ruby \
+        css_parser \
+        doorkeeper-openid_connect \
+        erb \
+        excon \
+        faraday \
+        nokogiri \
+        oauth2 \
+        puma \
+        sidekiq-cron \
+        thor \
+        view_component \
+ && /opt/gitlab/embedded/bin/gem cleanup \
+        net-imap \
+        addressable \
+        aws-sdk-s3 \
+        concurrent-ruby \
+        css_parser \
+        doorkeeper-openid_connect \
+        erb \
+        excon \
+        faraday \
+        nokogiri \
+        oauth2 \
+        puma \
+        sidekiq-cron \
+        thor \
+        view_component
 
 # --- OS (apt)：libgcrypt20 / libgnutls30t64 / libsystemd0 / libudev1 / liblzma5 ---
 # libgnutls30t64：CVE-2026-33845/33846/3832/3833/42009~42015/5260/5419（12 筆）一次性修補
