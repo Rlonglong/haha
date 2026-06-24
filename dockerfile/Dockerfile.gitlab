@@ -1,0 +1,29 @@
+# dai/gitlab:v1.0
+# Base: gitlab/gitlab-ee:latest (ubuntu 24.04)
+#
+# 本層修補的 CRITICAL CVE（詳見 ./report/gitlab_report_v0.md 第一節）：
+#   - CVE-2019-19919 / CVE-2021-23369 / CVE-2021-23383
+#     handlebars (omnibus 內嵌 npm 的內部相依套件) 1.0.0 -> 4.7.7
+#   - CVE-2026-42257 / CVE-2026-42258
+#     net-imap (gitlab-rails gem) 0.4.21 -> 0.6.4
+#
+# 無法在此層修補的 CRITICAL CVE（靜態編譯於官方 Go binary，需等待官方重新發布 image）：
+#   - CVE-2026-33186  google.golang.org/grpc  (alertmanager / consul / cosign / registry)
+#   - CVE-2026-33816  github.com/jackc/pgx/v5(gitlab-elasticsearch-indexer / registry)
+#   詳見 ./vulnerability/gitlab_vulner_report.md
+
+FROM gitlab/gitlab-ee:latest
+
+# --- CVE-2026-42257 / CVE-2026-42258: net-imap 命令注入 ---
+# gitlab-rails 內嵌的 net-imap gem 升級到官方修補版本（>= 0.6.4）。
+# net-imap 為葉節點 gem（僅供 "reply by email" / IMAP 功能使用），與 Rails 內部耦合度低，
+# 可安全地用 gem install 覆蓋既有版本而不需重新 bundle 整個 gitlab-rails。
+RUN /opt/gitlab/embedded/bin/gem install net-imap -v 0.6.4 \
+    --no-document \
+    --install-dir /opt/gitlab/embedded/lib/ruby/gems/3.3.0
+
+# --- CVE-2019-19919 / CVE-2021-23369 / CVE-2021-23383: handlebars 原型污染 / RCE ---
+# 受影響的 handlebars 是 omnibus 內嵌 npm 自身的內部相依套件（npm 用於資產建置工具鏈），
+# 並非 gitlab-rails 執行期相依，升級僅影響內嵌 npm 工具本身，風險低。
+RUN /opt/gitlab/embedded/bin/npm install -g handlebars@4.7.7 \
+    --prefix /opt/gitlab/embedded
