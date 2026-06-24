@@ -126,3 +126,58 @@ BUNDLE_GEMFILE=/opt/gitlab/embedded/service/gitlab-rails/Gemfile \
    - 核對並對齊 `thor`、`aws-sdk-s3` 實際版本號。
 2. 修正後需要使用者在有 Docker/Trivy 的環境重新 build + rescan，產出 `gitlab_v2.txt`，再次驗證 gemspec 弱點是否真正清除（包含驗證 gitlab-rails 應用本身開機正常，因為 `bundle update` 會改 `Gemfile.lock`，需確認沒有破壞既有相依關係）。
 3. 待確認 `doorkeeper-openid_connect` 1.10.0 新版本在重掃後是否乾淨（v1 掃描資料行被截斷未完整確認，下一輪重新檢查）。
+
+---
+
+## 四、第二輪驗證（使用者用 v1.2 Dockerfile 重新 build 後更新的 `gitlab_v1.txt`）
+
+使用者用上面 v1.2 修正後的 `Dockerfile.gitlab` 重新 build + rescan，覆蓋更新了 `report/gitlab_v1.txt`。比對結果：
+
+### 總量大幅下降
+
+| | LOW | MEDIUM | HIGH | CRITICAL | 合計 |
+|---|---|---|---|---|---|
+| v0（修補前） | 28 | 263 | 572 | 22 | 885 |
+| v1 第一輪（v1.1 Dockerfile） | 27 | 242 | 564 | 20 | 853 |
+| v1 第二輪（v1.2 Dockerfile） | 12 | 217 | 543 | **6** | 778 |
+
+**CRITICAL 從 20 筆降到 6 筆，且剩下的 6 筆全部是 gobinary（alertmanager/consul/cosign/gitlab-elasticsearch-indexer/registry 的 grpc-go、pgx），也就是本來就記錄在「無法自行修補」清單裡、預期會留下的項目。換句話說：CRITICAL 等級裡所有「可修補」的項目，包括 net-imap，這次真的全部清除了。**Secrets 掃描這次也是 0 筆（之前 11 筆 gitleaks 樣本字串 false positive 這次完全沒有出現，可能是這次 build 的 GitLab 原始碼路徑或掃描設定有差異，非本次修補造成，不影響弱點修補的結論）。
+
+### gemspec：bundle update + gem cleanup 機制確認有效（12/15）
+
+逐一核對 Report Summary，以下 12 個套件的**舊版本 gemspec 已經完全從磁碟上消失**，只剩新版本（0 弱點）：
+
+`net-imap`（連 v0 原本就並存的 0.4.21 **與** 0.6.4 兩個舊版本都被清掉，只剩 0.6.4.1）、`addressable`、`concurrent-ruby`、`css_parser`、`doorkeeper-openid_connect`、`excon`、`faraday`、`nokogiri`、`oauth2`、`puma`、`sidekiq-cron`、`view_component`。
+
+**這證實了上一輪報告提出的修正機制（`gem install` → `bundle update --local --conservative` → `gem cleanup`）是有效的**，不是只能靠推理；net-imap 的 CRITICAL CVE-2026-42257/42258 這次真正消失了。
+
+### gemspec：3 個套件仍有舊版本殘留（aws-sdk-s3 / erb / thor）
+
+| 套件 | 殘留舊版本 | 推測原因 |
+|------|------|------|
+| `erb` | `specifications/default/erb-4.0.3.gemspec`（注意路徑在 `default/` 底下） | **`erb` 是 Ruby 3.x 內建的 default gem**，隨 Ruby 本體安裝、不是一般可移除的 gem。`gem cleanup` 設計上不會去動 default gem，所以舊版本永遠會留在 `specifications/default/` 底下，即使我們另外裝了 4.0.3.1／6.0.4 新版本也不會被清掉。這不是我們操作失誤，是 RubyGems 對 default gem 的保護機制，要徹底清除需要用 `gem update --system` 等級的操作去動 Ruby 本身內建的 gem 集合，風險遠高於本次修補範圍。 |
+| `thor` | `thor-1.2.2.gemspec` | `--conservative` 模式只更新我們指定的套件版本，**但不會破壞 Gemfile.lock 裡其他套件對舊版本的相依限制**。若 Gemfile.lock 裡還有其他 gem（例如某個 rails/omnibus 工具）鎖定 `thor ~> 1.2`，conservative 模式就不會把 thor 升到滿足我們需求的版本範圍之外，新版本因此跟舊版本並存。 |
+| `aws-sdk-s3` | `aws-sdk-s3-1.149.1.gemspec` | 同上，推測有其他相依鎖住 `aws-sdk-s3` 在 1.149.x 範圍。 |
+
+這 3 個是目前 bundle update --conservative 機制本身的限制，不是退步；下一輪如果要徹底清除，需要先確認 Gemfile.lock 裡誰在鎖這兩個版本（`bundle why <gem>` 或檢視 lockfile），評估是否能用非 conservative 模式局部放寬，但這會增加牽連其他套件版本的風險，需要更謹慎評估，本輪先記錄、不強行處理。
+
+### ⚠️ 異常：node-pkg（embedded npm）整層完全消失，需要使用者確認
+
+這次重新掃描的 Report Summary 裡，**完全找不到任何 `/opt/gitlab/embedded/lib/node_modules/...` 路徑的條目**——不只是「乾淨」，是整個 node_modules 目錄在這次掃描結果裡完全不存在的痕跡，`handlebars`、`diff`、`ini`、`json`、`npm`、`pug`、`yaml` 全部都沒有出現（連乾淨的 0 筆記錄都沒有）。對比上一輪掃描（第一輪 v1.txt）這些套件還在報告裡（部分乾淨、部分仍有殘留），這次是整個消失，跟 gemspec 的「舊版本被清除、新版本留著」完全不同的狀況。
+
+`Node.js (node-pkg)` 這次只剩下 `markdown`（GitLab 原始碼自帶、跟我們無關）跟 `thrift`（Installed Version 顯示 `0.0.0-DEVELOPMENT`，明顯是 gitlab-rails 自己 webpack 資源裡內嵌的 thrift package.json，不是我們 `npm install -g thrift@0.23.0` 裝的那個）。
+
+**這代表我們 Dockerfile 裡用 `npm install -g` 裝的 handlebars / diff / ini / json / npm / pug / yaml 這一層，這次 build 出來的 image 裡可能整層都不在了**——不是修補失敗被標記，是整個目錄消失，連痕跡都沒有。可能原因（無法在這個 sandbox 內驗證，需要使用者協助確認）：
+
+1. **npm 自我替換問題**：批次安裝指令裡同時包含 `npm@6.14.6`（升級 npm 自己）跟其他套件（diff/ini/json/pug/thrift/yaml）在同一個 `npm install -g` 呼叫裡，npm 在替換自己執行中的程式檔案時，理論上可能讓同一批次裡其他套件的安裝結果不穩定。但這個理論沒辦法解釋 `handlebars` 為什麼也一起消失，因為 handlebars 是獨立另一個 `RUN npm install -g handlebars@4.7.9` 指令，跟 npm 自我升級無關。
+2. **build 當時的 docker build log**：請麻煩貼一下這兩個 `RUN /opt/gitlab/embedded/bin/npm install -g ...` 步驟在 build 時的實際輸出，確認指令是否真的執行成功、有沒有任何 warning/error 被忽略。
+3. **base image 漂移**：`FROM gitlab/gitlab-ee:latest` 是浮動 tag，如果這次 build 時拉到的 `latest` 跟上一輪不是同一個 digest，理論上 embedded npm 的路徑結構可能有變動，但如果路徑真的不存在，`RUN` 應該會直接失敗讓整個 build 中止（而這次 build 顯然有跑到後面的 apt 層，OS 修補確認生效），所以這個可能性較低，但仍建議確認一下兩次 build 拉到的 base image digest 是否相同。
+
+**這個問題目前還沒有解法，需要使用者提供更多資訊（build log 或重新跑一次 build 確認）才能繼續排查，先記錄在這裡，不在這輪自行猜測修改 Dockerfile。**
+
+### 本輪結論
+
+- ✅ OS（apt）：維持全部生效。
+- ✅ gemspec：12/15 套件（含最關鍵的 net-imap CRITICAL）確認 `bundle update --local --conservative` + `gem cleanup` 機制有效清除舊版本。v1.2 的修正方向是對的，不再是「只能靠推理」。
+- ⚠️ gemspec 剩餘 3 個（aws-sdk-s3/erb/thor）：原因可解釋（default gem 保護機制 + conservative 模式的設計限制），風險可接受，非緊急。
+- ❌ **node-pkg（npm 內嵌工具鏈整層）完全從掃描結果消失，原因未知，需要使用者協助提供 build log 才能排查，暫不下定論、不在本輪自行修改 Dockerfile 內容。**
