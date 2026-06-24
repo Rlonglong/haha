@@ -9,7 +9,7 @@
 6. 外圍的 docker-compose 完全不用管。
 
 ## 修補流程
-1. 透過 trivy 掃描 Docker image，產出 `xx_report_v0.md` 和 `xx_v0.txt`，xx 是該服務的名稱，markdown 是統整 Medium 以上的弱點所寫成的報告。report 的目的是要讓下一步可以快速的進行修補的動作，所以要分成 `目前有可修補版本`、`目前無可修補版本，但可直接進行簡單的修補解決弱點`、`無法自行修補，需等待官方釋出修補` 這三個區塊。
+1. 透過 trivy 掃描 Docker image，產出 `xx_report_v0.md` 和 `xx_v0.txt`，xx 是該服務的名稱，markdown 是統整 Medium 以上的弱點所寫成的報告。report 的目的是要讓下一步可以快速的進行修補的動作，所以要分成 `目前有可修補版本`、`目前無可修補版本，但可直接進行簡單的修補解決弱點`、`無法自行修補，需等待官方釋出修補` 這三個區塊。Low 等級的弱點也要列入報告，但不需分類到上述三個區塊，而是逐項說明為什麼該弱點可以存在（風險可接受的理由）。
 2. 針對第一步的 report，修改 Dockerfile.xx 跟 requirements_xx.in 進行修補，並將修補的方法或措施寫成 `xx_fix_v?.md`。Dockerfile.xx 跟 requirements_xx.in 裡面也簡單用註解列出這個區塊解決什麼 CVE 等等。Docker image 的 tag 跟命名規則是 `dai/xx:v1.x`。
 3. 修補後，再進行一次 trivy 掃描，產出跟第一步第二步一樣 (report.md, .txt, fix.md)，但是後綴變成 `_v1`。
 4. 進行評估是否需要重複 step 2~3 再次修補，產出後綴依此類推。
