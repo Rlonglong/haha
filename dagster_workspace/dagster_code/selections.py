@@ -37,7 +37,11 @@ def build_db_sync_asset_keys(table_name: str) -> list[AssetKey]:
 
 def build_manual_only_selection():
     """manual_only=True 的表：sensor 不碰，也要從 __DAILY / __MONTHLY 兩個
-    批次 job 的選集裡扣掉，確保只有「明確點這張表」才會執行。"""
+    批次 job 的選集裡扣掉，確保只有「明確點這張表」才會執行。
+
+    沒有任何表設 manual_only 時回傳 None（而不是空的 AssetSelection），
+    呼叫端要自己判斷 —— 這樣就不需要依賴「空選集」的 API，
+    不同 dagster 版本都能用。"""
     keys = []
     for table_name, config in TABLE_CSV_MAPPING.items():
         if config.get("manual_only", False):
@@ -46,7 +50,9 @@ def build_manual_only_selection():
         if config.get("manual_only", False):
             keys.extend(build_db_sync_asset_keys(table_name))
 
-    return AssetSelection.keys(*keys) if keys else AssetSelection.nothing()
+    if not keys:
+        return None
+    return AssetSelection.keys(*keys)
 
 
 def build_monthly_selection(manifest_path):

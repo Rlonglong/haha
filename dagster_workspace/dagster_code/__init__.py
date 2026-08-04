@@ -36,20 +36,28 @@ monthly_selection = (
 
 daily_selection = AssetSelection.all() - monthly_selection
 
-# manual_only=True 的表：連批次 job 都不涵蓋，只能單獨手動 materialize
+# manual_only=True 的表：連批次 job 都不涵蓋，只能單獨手動 materialize。
+# 沒有任何表設 manual_only 時是 None，此時兩個 job 的選集維持原樣。
 manual_only_selection = build_manual_only_selection()
+
+daily_job_selection = AssetSelection.all() - monthly_selection
+monthly_job_selection = monthly_selection
+
+if manual_only_selection is not None:
+    daily_job_selection = daily_job_selection - manual_only_selection
+    monthly_job_selection = monthly_job_selection - manual_only_selection
 
 # ==============================================================================
 # Job 定義
 # ==============================================================================
 daily_all_assets_job = define_asset_job(
     name="__DAILY_ASSET_JOB",
-    selection=AssetSelection.all() - monthly_selection - manual_only_selection
+    selection=daily_job_selection
 )
 
 monthly_assets_job = define_asset_job(
     name="__MONTHLY_ASSET_JOB",
-    selection=monthly_selection - manual_only_selection
+    selection=monthly_job_selection
 )
 
 ssh_pipes_client = PipesSSHClient(
