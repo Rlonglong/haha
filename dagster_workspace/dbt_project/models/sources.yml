@@ -1,0 +1,67 @@
+version: 2
+
+sources:
+  - name: database                                # 這是你在 dbt 裡面給這個資料來源的「邏輯代稱」
+    schema: dbo
+    tables:
+      - name: T_CUST
+      - name: T_CUST_PS
+      - name: T_LOW_INCOME_ACCT
+      - name: T_TXN_PS
+      - name: T_TXN_PS_FIRST
+      - name: T_EARLYJOB_LIST
+      - name: T_CUST_PS_CHG
+      - name: T_MAX_WITHDRAWALS_FOR_3DS_SAVING
+      - name: T_FARPOST                           # 偏鄉分局_原住民地區郵局_20250526.csv
+      - name: T_SUBSIDY                           # 指定補助帳戶清單_{}.csv
+      - name: T_LOW_INCOME                        # 低收入戶帳戶清單_{}.csv
+      - name: T_CUST_PS_LASTCTRL
+      - name: T_FRAUD360
+      - name: T_CUST_WARNINGFLG
+      - name: mrt_WARNINGFLG_BONUS
+      - name: mrt_UNLOCK_SCORE_LIST
+      - name: mrt_BLACK_IP_LIST
+      - name: mrt_WARNINGFLG_B_IPDEVICE
+      - name: mrt_WARNINGFLG_SHARE_DEVICE
+      - name: mrt_WARNINGFLG_SHARE_IP
+      - name: mrt_RISKY_IP
+      - name: mrt_RISKY_DEVICE
+      - name: T_CUST_CHG
+      - name: T_CTBC_LIST
+      - name: T_IWEBATM
+      - name: T_IPOST
+      - name: T_MPOST
+      - name: T_IPOST_LOG
+      - name: T_MPOST_LOG
+      - name: WHITE_IP
+      - name: WHITE_DEVICE
+      - name: T_CUST_DA
+
+  # - name: earlyjob
+  #   schema: dbo
+  #   tables: 
+  #     - name: mrt_ATM_C2_earlyjob
+  #     - name: mrt_ATM_E2_earlyjob
+  #     - name: mrt_ATM_A2_earlyjob
+  #     - name: mrt_ATM_G_earlyjob
+  #     - name: mrt_ATM_F_earlyjob
+    
+  - name: raw_db
+    schema: dbo
+    tables:
+      - name: raw_csv_data
+
+  # - name: ATM_C2
+  #   schema: dbo
+  #   tables:
+  #     - name: T_TXN_PS
+
+  # - name: ATM_E2
+  #   schema: dbo
+  #   tables:
+  #     - name: T_TXN_PS
+
+  # - name: snp_cust
+  #   schema: dbo
+  #   tables:
+  #     - name: T_CUST

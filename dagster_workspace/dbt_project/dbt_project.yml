@@ -1,0 +1,35 @@
+# 專案名稱 (只能使用小寫英文字母與底線)
+name: 'post_office_dbt'
+version: '1.0.0'
+config-version: 2
+
+# 👇 致命關鍵：這行必須跟你的 profiles.yml 最上層的名稱「一模一樣」
+profile: 'post_office_dbt'
+
+# 告訴 dbt 你的各種檔案放在哪些資料夾
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+# 編譯結果 (包含 manifest.json) 的存放位置
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  post_office_dbt:
+    intermediate:
+      +group: intermediate_tables
+    +group: fraud_detection_models
+
+snapshots:
+  post_office_dbt:
+    +group: snapshots
+
+flags:
+  dbt_sqlserver_use_native_string_types: true
+  dbt_sqlserver_use_default_schema_concat: true

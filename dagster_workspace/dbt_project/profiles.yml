@@ -1,0 +1,16 @@
+post_office_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: sqlserver
+      driver: 'ODBC Driver 18 for SQL Server'
+      server: 10.10.20.92
+      port: 1433
+      database: DDEQDTAI
+      schema: dbo
+      # 帳密不寫在檔案裡，改由環境變數帶入，避免明碼進版控。
+      # VM4 上請在 dbt 容器可讀到的位置設定 DBT_DB_USER / DBT_DB_PASSWORD。
+      user: "{{ env_var('DBT_DB_USER') }}"
+      password: "{{ env_var('DBT_DB_PASSWORD') }}"
+      encrypt: true
+      trust_cert: true  # 內網通常需要信任憑證

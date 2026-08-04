@@ -1,0 +1,4 @@
+load_from:
+  - python_module:
+      module_name: dagster_code
+      working_directory: /app/workspace
