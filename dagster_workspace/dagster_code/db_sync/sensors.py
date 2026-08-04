@@ -87,6 +87,10 @@ def db_sync_watcher_sensor(context):
     requests = []
 
     for table_name, config in DB_SYNC_MAPPING.items():
+        # manual_only 的表不輪詢來源 DB，只能手動 materialize（跟 EL 線同一個旗標）
+        if config.get("manual_only", False):
+            continue
+
         freq = config.get("freq", "daily")
         group_len = 6 if freq == "monthly" else 8
         watch_col = config.get("sensor_watch_col", "NOTIFY_DATE")

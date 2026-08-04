@@ -156,6 +156,11 @@ def _watch_files_and_build_requests(
     requests = []
 
     for table_name, config in TABLE_CSV_MAPPING.items():
+        # manual_only 的表完全不進 sensor：只能在 UI 上手動 materialize / backfill。
+        # 注意這跟「freq 沒填」不一樣 —— freq 還是要照實填，才不會讓 partition
+        # 與檔名日期格式跑掉；要不要自動觸發交給這個旗標決定。
+        if config.get("manual_only", False):
+            continue
         if config.get("freq") != freq:
             continue
 

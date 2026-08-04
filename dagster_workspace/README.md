@@ -11,7 +11,7 @@
 2. [目錄結構：哪個位置放什麼](#2-目錄結構哪個位置放什麼)
 3. [`target/` 與 `compiled/`：去哪裡看「帶入變數後的 SQL」](#3-target-與-compiled去哪裡看帶入變數後的-sql)
 4. [Asset 命名規則與資料流](#4-asset-命名規則與資料流)
-5. [排程與觸發機制（Sensor / Automation / Job）](#5-排程與觸發機制sensor--automation--job)
+5. [排程與觸發機制（Sensor / Automation / Job / manual_only）](#5-排程與觸發機制sensor--automation--job)
 6. [SOP A：新增一張來源表（檔案落地 → BCP 入庫）](#6-sop-a新增一張來源表檔案落地--bcp-入庫)
 7. [SOP B：新增一支 dbt model（SQL）](#7-sop-b新增一支-dbt-modelsql)
 8. [SOP C：新增 intermediate model 與 snapshot](#8-sop-c新增-intermediate-model-與-snapshot)
@@ -337,8 +337,8 @@ AutomationCondition.eager().without(AutomationCondition.in_latest_time_window())
 
 | Job | 內容 | 用途 |
 |---|---|---|
-| `__DAILY_ASSET_JOB` | `AssetSelection.all() - monthly_selection` | UI 手動整批重跑日檔 |
-| `__MONTHLY_ASSET_JOB` | `monthly_selection` | UI 手動整批重跑月檔 |
+| `__DAILY_ASSET_JOB` | `AssetSelection.all() - monthly_selection - manual_only_selection` | UI 手動整批重跑日檔 |
+| `__MONTHLY_ASSET_JOB` | `monthly_selection - manual_only_selection` | UI 手動整批重跑月檔 |
 
 `monthly_selection` = manifest 裡有 `monthly_job` tag 或 resource_type 為 snapshot 的節點 ∪ `monthly_extract_load` group。日常運作靠 sensor，不靠 job；job 主要給人工補跑用。
 
@@ -347,6 +347,45 @@ AutomationCondition.eager().without(AutomationCondition.in_latest_time_window())
 - `dagster.yaml`：`QueuedRunCoordinator.max_concurrent_runs: 5`、`default_op_concurrency_limit: 1`。
 - 每個 asset 都帶 `pool=<asset 名>`，配合上面的 limit=1，**同一個 asset 不會同時跑兩份**（避免同一張表被兩個 partition 同時 BCP）。
 - 重試有兩層：asset 層 `RetryPolicy(max_retries=retries, delay=retry_delay_sec)`；run 層 tag `dagster/max_retries: 3` + `dagster/retry_strategy: FROM_ASSET_FAILURE`（只重跑失敗的 asset）。dbt 那層另有 `_run_dbt_levels` 內建的「每層最多重試 2 次、間隔 30s」。
+
+### 5.8 只手動觸發的表（`manual_only`）
+
+有些表不想讓它自動跑（例如一次性補檔、對方不定期才給、或還在測試階段）。設定加一行即可：
+
+```python
+"T_ONE_OFF": {
+    "freq": "daily",          # ★照實填★ 它決定 partition 與 {date} 的格式
+    "manual_only": True,      # ← 只有這行決定「要不要自動觸發」
+    "input_folder": "...",
+    "template": "T_ONE_OFF_{date}.csv",
+    ...
+},
+```
+
+設 `manual_only=True` 之後：
+
+| 觸發途徑 | 會不會跑 |
+|---|---|
+| `daily_file_watcher_sensor` / `monthly_file_watcher_sensor` | ✗ 迴圈一開始就 `continue` |
+| `db_sync_watcher_sensor`（db_sync 線同旗標） | ✗ |
+| `__DAILY_ASSET_JOB` / `__MONTHLY_ASSET_JOB` | ✗ 已從兩個 job 的選集扣掉 |
+| `automation_sensor` | ✗ EL / db_sync 的節點本來就沒有 `AutomationCondition`，不受它管 |
+| UI 上點該 asset → Materialize / Backfill | **✓ 唯一入口** |
+
+**不要改用「不填 `freq`」來達成同樣效果。** 兩者都會讓 sensor 撈不到，但少填 `freq` 會連帶把 partition 變成月檔、`{date}` 變成 `YYYYMM`，檔名對不上、partition 也只能選每月 1 號。`manual_only` 只關掉觸發，其他行為完全不變。
+
+實作位置（要改行為時看這幾處）：
+
+| 檔案 | 做什麼 |
+|---|---|
+| `sensors.py::_watch_files_and_build_requests` | 迴圈開頭 `if config.get("manual_only", False): continue` |
+| `db_sync/sensors.py::db_sync_watcher_sensor` | 同上 |
+| `selections.py::build_manual_only_selection` | 組出這些表所有節點的 asset key |
+| `__init__.py` | 兩個 job 的 selection 都減掉 `manual_only_selection` |
+
+> ⚠️ `selections.py::build_el_asset_keys` 是照 config 重新推算「這張表有哪些節點」，條件必須跟 `assets.py::build_table_assets` 一致。**日後在 `build_table_assets` 新增節點，這裡要一起加**，否則新節點不會被排除在批次 job 之外。
+
+**匯出（`SQL_TO_CSV_MAPPING`）目前沒有這個旗標**：Export asset 是靠 `AutomationCondition.eager()` 自動帶起的，要做成手動專用得把該 asset 的 `automation_condition` 拿掉，跟這裡的機制不同。需要的話再說。
 
 ---
 
@@ -710,7 +749,8 @@ Snapshot 一定是月頻（`CustomDbtTranslator.get_partitions_def` 對 `resourc
 | `output_folder` | str | 同 `input_folder` | 否 | 清洗輸出目錄 |
 | `error_log_dir` | str | `<output_folder>/bcp_error_logs` | 否 | BCP 錯誤 log 目錄 |
 | `template` | str | 無 | **是** | 本地標準檔名模板，必須含 `{date}` |
-| `freq` | `"daily"` \| `"monthly"` | 無 | **是（實務上必填）** | 決定 partition 定義、日期格式、group、由哪支 sensor 監控。⚠️ 不填會出現不一致狀態：partition 變成 monthly（`freq == "daily"` 才給 daily），group 卻是 `extract_load`，而且兩支 sensor 都用 `config.get("freq") != freq` 過濾 → **這張表永遠不會被自動觸發** |
+| `freq` | `"daily"` \| `"monthly"` | 無 | **是** | 決定 partition 定義、日期格式、group、由哪支 sensor 監控。⚠️ **不要用「不填 freq」來達成手動專用**，那會讓 partition 變成月檔、`{date}` 變成 `YYYYMM`，檔名直接對不上；要手動專用請用下面的 `manual_only` |
+| `manual_only` | bool | `False` | 否 | `True` 代表這張表**完全不自動觸發**：sensor 跳過、`__DAILY_ASSET_JOB` / `__MONTHLY_ASSET_JOB` 也不涵蓋，只能在 UI 上單獨 materialize 或 backfill。`freq` 仍要照實填 |
 | `delimiter` | str | `","` | 否 | CSV 分隔符 |
 | `use_data_rule` | bool | `False` | 否 | 建立 `*_named` 節點，依檔規補欄位名 |
 | `data_rule_sheet` | str | 表名 | 否 | 檔規 sheet 名稱與表名不同時指定 |
@@ -766,6 +806,7 @@ Snapshot 一定是月頻（`CustomDbtTranslator.get_partitions_def` 對 `resourc
 | `delimiter` | str | `"\|"` | 否 | 中繼 CSV 分隔符 |
 | `retries` / `retry_delay_sec` | int | `0` / `60` | 否 | 重試設定 |
 | `archive_dir` | str | 無 | **是** | 封存目錄（相對路徑會接在 `/run/media/root/D/data/` 後） |
+| `manual_only` | bool | `False` | 否 | `True` 代表不輪詢來源 DB，只能手動 materialize（同 EL 線的旗標） |
 
 模組層常數：`DB_SYNC_STABLE_SECONDS = 300`（筆數要穩定多久）、`DB_SYNC_STALL_WARN_SECONDS = 7200`（超時警告）。
 
