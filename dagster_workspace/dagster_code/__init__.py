@@ -29,10 +29,13 @@ from dagster_code.db_sync.sensors import db_sync_watcher_sensor
 # 動態建立 Monthly/Daily Selection
 # ==============================================================================
 
-monthly_selection = (
-    build_monthly_selection(post_office_dbt.manifest_path) |
-    AssetSelection.groups("monthly_extract_load")
-)
+# build_monthly_selection 沒有任何月檔節點時回傳 None，
+# 此時月檔選集只剩下 monthly_extract_load 這個 group。
+_monthly_keys_selection = build_monthly_selection(post_office_dbt.manifest_path)
+monthly_selection = AssetSelection.groups("monthly_extract_load")
+
+if _monthly_keys_selection is not None:
+    monthly_selection = _monthly_keys_selection | monthly_selection
 
 daily_selection = AssetSelection.all() - monthly_selection
 

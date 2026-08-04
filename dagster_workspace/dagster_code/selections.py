@@ -56,29 +56,31 @@ def build_manual_only_selection():
 
 
 def build_monthly_selection(manifest_path):
-    # EL 層
-    monthly_tables = [
-        t for t, c in TABLE_CSV_MAPPING.items()
+    """月檔節點的 asset key 集合：EL 層的月檔表 + dbt 層有 monthly_job tag
+    或是 snapshot 的節點。
+
+    兩層合成同一份 key 清單再一次轉成 AssetSelection，完全不需要「空選集」
+    的 API；都沒有的話回傳 None，由呼叫端判斷。"""
+    monthly_keys = []
+
+    # EL 層：freq == "monthly" 的表
+    monthly_keys += [
+        AssetKey(["database", t])
+        for t, c in TABLE_CSV_MAPPING.items()
         if c.get("freq") == "monthly"
     ]
-    monthly_el_selection = AssetSelection.keys(
-        *[AssetKey(["database", t]) for t in monthly_tables]
-    ) if monthly_tables else AssetSelection.nothing()
 
     # dbt 層：從 manifest 找 monthly_job tag 或 snapshot
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    monthly_dbt_keys = [
+    monthly_keys += [
         AssetKey([node["name"]])
         for node in manifest.get("nodes", {}).values()
         if "monthly_job" in node.get("tags", [])
         or node.get("resource_type") == "snapshot"
     ]
-    monthly_dbt_selection = (
-        AssetSelection.keys(*monthly_dbt_keys)
-        if monthly_dbt_keys
-        else AssetSelection.nothing()
-    )
 
-    return monthly_el_selection | monthly_dbt_selection
+    if not monthly_keys:
+        return None
+    return AssetSelection.keys(*monthly_keys)
