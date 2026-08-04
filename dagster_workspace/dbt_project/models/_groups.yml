@@ -1,0 +1,12 @@
+version: 2
+
+groups:
+  - name: fraud_detection_models
+    owner:
+      name: fraud_team
+  - name: intermediate_tables
+    owner:
+      name: fraud_team
+  - name: snapshots
+    owner:
+      name: fraud_team

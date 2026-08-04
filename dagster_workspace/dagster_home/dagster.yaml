@@ -1,0 +1,39 @@
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    max_concurrent_runs: 5
+
+
+concurrency:
+  default_op_concurrency_limit: 1
+
+
+# 1. 關閉官方遙測 (Telemetry) 以減少無謂對外連線日誌
+telemetry:
+  enabled: false
+
+
+python_logs:
+  # 全域層級開到 INFO，這樣 UI 才看得到
+  python_log_level: INFO
+  
+  managed_python_loggers:
+    - dagster.daemon
+    - dagster.scheduler
+    - dagster.sensor
+  
+  # dagster_handler_config:
+  #   handlers:
+  #     mySysLogHandler:
+  #       class: logging.handlers.SysLogHandler
+  #       level: WARNING   # ← 這個 handler 自己只收 WARNING 以上，送去 rsyslog
+  #       address: ["你的rsyslog主機", 514]
+
+auto_materialize:
+  enabled: true
+  minimum_interval_seconds: 30
+
+code_servers:
+  reload_timeout: 300
+  local_startup_timeout: 120
