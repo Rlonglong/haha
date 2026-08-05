@@ -29,7 +29,7 @@
 Created: 2026-08-05
 Description: 這支模型在做什麼（一句話講清楚業務目的）
 Change Log:
-- 2026-08-05 [NEW] 初版
+- 2026-08-05 [員編] 初版
 */
 
 -- dbt config
