@@ -842,6 +842,28 @@ def build_export_assets(table_name: str, config: dict):
             "--end-date", end_date.isoformat(),
         ]
 
+        # ------------------------------------------------------------
+        # 落地策略
+        # 匯出的名單是「解密後的明文」，能不落地就不要落地。
+        # 有設 ftp_remote_path 代表要直接送 FTP，此時預設不寫本機檔案；
+        # 只有明確設 keep_local_copy=True（測試用）才會同時落地，而且會
+        # 在 log 留下警告，避免有人測完忘記關掉。
+        # ------------------------------------------------------------
+        keep_local_copy = config.get("keep_local_copy", False)
+
+        if ftp_remote_path and remote_csv_path:
+            if keep_local_copy:
+                context.log.warning(
+                    f"⚠️ keep_local_copy=True：解密後的明文 CSV 會同時留在 VM1 "
+                    f"（{remote_csv_path}），僅供測試，上線前請移除此設定"
+                )
+            else:
+                context.log.info(
+                    f"已設定 ftp_remote_path，直接送 FTP 不落地，"
+                    f"忽略 output_folder（{output_folder}）"
+                )
+                remote_csv_path = None
+
         if remote_csv_path:
             command.extend(["--output", remote_csv_path])
 
