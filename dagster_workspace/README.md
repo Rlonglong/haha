@@ -11,7 +11,7 @@
 2. [目錄結構：哪個位置放什麼](#2-目錄結構哪個位置放什麼)
 3. [`target/` 與 `compiled/`：去哪裡看「帶入變數後的 SQL」](#3-target-與-compiled去哪裡看帶入變數後的-sql)
 4. [Asset 命名規則與資料流](#4-asset-命名規則與資料流)
-5. [排程與觸發機制（Sensor / Automation / Job / manual_only）](#5-排程與觸發機制sensor--automation--job)
+5. [排程與觸發機制（Sensor / Automation / Job）](#5-排程與觸發機制sensor--automation--job)
 6. [SOP A：新增一張來源表（檔案落地 → BCP 入庫）](#6-sop-a新增一張來源表檔案落地--bcp-入庫)
 7. [SOP B：新增一支 dbt model（SQL）](#7-sop-b新增一支-dbt-modelsql)
 8. [SOP C：新增 intermediate model 與 snapshot](#8-sop-c新增-intermediate-model-與-snapshot)
@@ -29,7 +29,7 @@
 
 | 角色 | 位置 | 負責什麼 |
 |---|---|---|
-| **VM4（Dagster 主機）** | 跑 `dagster-webserver` / `dagster-daemon` / code server 的容器 | 排程、相依性判斷、發指令、收 log。**不碰原始資料檔內容**（唯一例外：透過 `pymssql` 對 SQL Server 下 partition/index 的 DDL） |
+| **VM4（Dagster 主機）** | 跑 `dagster-webserver` / `dagster-daemon` / code server 的容器 | 排程、相依性判斷、發指令、收 log。**不碰原始資料檔內容** |
 | **VM1（Runner 主機）** | `10.10.159.74`，帳號 `bcp_runner` | 真正做事的機器：連 FTP、解壓縮、套檔規、加解密、清洗、BCP、匯出 CSV。所有腳本放在 `/home/bcp_runner/scripts/` |
 | **dbt 執行容器** | 由 Dagster 用 `PipesDockerClient` 動態啟動，image `dai/dagster:v2.6` | 執行 `dbt build` / `dbt snapshot`，掛載 `dbt_project` 目錄 |
 | **SQL Server** | `10.10.20.92:1433`，DB `DDEQDTAI`，schema `dbo` | 資料倉儲本體 |
@@ -47,7 +47,7 @@ flowchart LR
         SRC[(來源 DB<br/>DDLQRMSV)] --> EX[db_extract<br/>撈取+解密] --> EN2[encrypted] --> BCP2[BCP 入庫] --> CU[cleanup]
     end
     subgraph L3["③ Transform 線（dbt）"]
-        DBT1[intermediate<br/>txn_ps_net] --> DBT2[mrt_* 詐欺模型]
+        DBT1[intermediate_net] --> DBT2[mrt_* 詐欺模型]
     end
     subgraph L4["④ Export 線"]
         DBT2 --> EXP[export_remote.py<br/>撈 DB → 解密 → CSV → 可選送 FTP]
@@ -75,7 +75,7 @@ flowchart LR
 
 ## 2. 目錄結構：哪個位置放什麼
 
-> 容器內路徑固定是 `/app/workspace/`，對應 VM4 host 的 `/data/deploy/workspace/dagster_workspace/`。
+> 容器內路徑固定是 `/app/workspace/` (docker 掛載的路徑，非實際路徑)，對應 VM4 host 的 `/data/deploy/workspace/dagster_workspace/` (實際掛載路徑)。
 > 也就是 **本 repo 的 `dagster_workspace/` = 容器的 `/app/workspace/`**。程式碼裡看到 `/app/workspace/xxx` 就是這裡的 `xxx`。
 
 ```
@@ -102,14 +102,14 @@ dagster_workspace/                    ← 容器 /app/workspace
 │
 └── dbt_project/                      ← dbt 專案（容器 /app/workspace/dbt_project）
     ├── dbt_project.yml               ← 專案名稱、路徑設定、group、flags
-    ├── profiles.yml                  ← 連線資訊（type/server/database/user/password）
+    ├── profiles.yml                  ← ★未進版控★ 連線資訊（type/server/database/user/password）
     ├── models/
     │   ├── sources.yml               ← ★所有 dbt 可以 source() 的來源表都要在這裡登記★
     │   ├── _groups.yml               ← group 與 owner 定義
     │   ├── intermediate/             ← 中介層（去沖正、淨額表），被其他 model 用 ref() 引用
     │   │   ├── txn_ps_net.sql        →  實體表 T_TXN_PS_NET
     │   │   └── txn_ps_first_net.sql  →  實體表 T_TXN_PS_FIRST_NET
-    │   └── *.sql                     ← 產出層：37 支詐欺偵測 model，多數 alias 成 mrt_*
+    │   └── *.sql                     ← 產出層：37 支詐欺偵測 model，alias 成 mrt_*
     ├── snapshots/
     │   ├── snp_cust.sql              ← T_CUST 的緩慢變動維度快照
     │   └── snp_dim_cust_act.sql
@@ -124,14 +124,14 @@ dagster_workspace/                    ← 容器 /app/workspace
 
 | 檔案 | 內容 | 什麼時候要改它 |
 |---|---|---|
-| `__init__.py` | 建 `Definitions`：`assets=[EL 資產, Export 資產, dbt daily, dbt monthly, db_sync 資產]`、`jobs=[__DAILY_ASSET_JOB, __MONTHLY_ASSET_JOB]`、`sensors=[5 支]`、`resources={"pipes": PipesDockerClient, "ssh_pipes": PipesSSHClient}` | 新增「一整條新的線」或新 sensor / resource 時 |
-| `assets.py` | ①`validate_sql_identifier` / `validate_path_component` 白名單防注入 ②`build_table_assets()` 依 config 動態產生 1～6 個 asset ③`CustomDbtTranslator` 決定 dbt asset 的 partition、automation condition、partition mapping ④`get_topological_levels()` + `_run_dbt_levels()` 把 dbt model 分層執行 ⑤`build_export_assets()` | 要改「節點流程本身」時（例如新增一個處理階段） |
+| `__init__.py` | 建 `Definitions`：`assets=[EL 資產, Export 資產, dbt daily, dbt monthly, db_sync 資產]`、`jobs=[__DAILY_ASSET_JOB, __MONTHLY_ASSET_JOB]`、`sensors=[5 支]`、`resources={"pipes": PipesDockerClient, "ssh_pipes": PipesSSHClient}` | <常態不需要> 新增「一整條新的線」或新 sensor / resource 時 |
+| `assets.py` | ①`validate_sql_identifier` / `validate_path_component` 白名單防注入 ②`build_table_assets()` 依 config 動態產生 1～6 個 asset ③`CustomDbtTranslator` 決定 dbt asset 的 partition、automation condition、partition mapping ④`get_topological_levels()` + `_run_dbt_levels()` 把 dbt model 分層執行 ⑤`build_export_assets()` | <常態不需要> 要改「節點流程本身」時（例如新增一個處理階段） |
 | `table_mapping.py` | 純設定字典。檔頭有一份完整註解版 `TEMPLATE_TABLE` 範本可直接複製 | **新增/調整一張來源表或一個匯出時，九成只改這裡** |
-| `sensors.py` | `_ssh_run` / `_ssh_listdir` / `_ssh_run_ftp_listdir` 遠端查檔；cursor 編解碼；`_watch_files_and_build_requests()` 共用掃描邏輯；daily / monthly 兩支 sensor；`automation_sensor`；`slack_failure_alert` | 改偵測頻率、穩定秒數、單次派發上限時 |
-| `selections.py` | 讀 `manifest.json` 找出 `monthly_job` tag 或 snapshot，聯集 `TABLE_CSV_MAPPING` 裡 `freq=="monthly"` 的表，組成 monthly selection | 幾乎不用改 |
-| `pipes_ssh_client.py` | `PipesSSHClient`：組 env → `shlex.quote` 全跳脫 → `ssh` 執行 → 收 stdout → 解析 Pipes 訊息。SSH 目標與金鑰路徑是模組層常數 | 換 VM1 IP / 帳號 / 金鑰 / timeout 時 |
+| `sensors.py` | `_ssh_run` / `_ssh_listdir` / `_ssh_run_ftp_listdir` 遠端查檔；cursor 編解碼；`_watch_files_and_build_requests()` 共用掃描邏輯；daily / monthly 兩支 sensor；`automation_sensor`；`slack_failure_alert` | <常態不需要> 改偵測頻率、穩定秒數、單次派發上限時 |
+| `selections.py` | 讀 `manifest.json` 找出 `monthly_job` tag 或 snapshot，聯集 `TABLE_CSV_MAPPING` 裡 `freq=="monthly"` 的表，組成 monthly selection | <常態不需要> 幾乎不用改 |
+| `pipes_ssh_client.py` | `PipesSSHClient`：組 env → `shlex.quote` 全跳脫 → `ssh` 執行 → 收 stdout → 解析 Pipes 訊息。SSH 目標與金鑰路徑是模組層常數 | <常態不需要> 換 VM1 IP / 帳號 / 金鑰 / timeout 時 |
 
-### 2.2 VM1 上的腳本（不在本 repo，但流程強相依）
+### 2.2 VM1 上的腳本
 
 放在 VM1 的 `/home/bcp_runner/scripts/`：
 
@@ -337,8 +337,8 @@ AutomationCondition.eager().without(AutomationCondition.in_latest_time_window())
 
 | Job | 內容 | 用途 |
 |---|---|---|
-| `__DAILY_ASSET_JOB` | `AssetSelection.all() - monthly_selection - manual_only_selection` | UI 手動整批重跑日檔 |
-| `__MONTHLY_ASSET_JOB` | `monthly_selection - manual_only_selection` | UI 手動整批重跑月檔 |
+| `__DAILY_ASSET_JOB` | `AssetSelection.all() - monthly_selection` | UI 手動整批重跑日檔 |
+| `__MONTHLY_ASSET_JOB` | `monthly_selection` | UI 手動整批重跑月檔 |
 
 `monthly_selection` = manifest 裡有 `monthly_job` tag 或 resource_type 為 snapshot 的節點 ∪ `monthly_extract_load` group。日常運作靠 sensor，不靠 job；job 主要給人工補跑用。
 
@@ -347,45 +347,6 @@ AutomationCondition.eager().without(AutomationCondition.in_latest_time_window())
 - `dagster.yaml`：`QueuedRunCoordinator.max_concurrent_runs: 5`、`default_op_concurrency_limit: 1`。
 - 每個 asset 都帶 `pool=<asset 名>`，配合上面的 limit=1，**同一個 asset 不會同時跑兩份**（避免同一張表被兩個 partition 同時 BCP）。
 - 重試有兩層：asset 層 `RetryPolicy(max_retries=retries, delay=retry_delay_sec)`；run 層 tag `dagster/max_retries: 3` + `dagster/retry_strategy: FROM_ASSET_FAILURE`（只重跑失敗的 asset）。dbt 那層另有 `_run_dbt_levels` 內建的「每層最多重試 2 次、間隔 30s」。
-
-### 5.8 只手動觸發的表（`manual_only`）
-
-有些表不想讓它自動跑（例如一次性補檔、對方不定期才給、或還在測試階段）。設定加一行即可：
-
-```python
-"T_ONE_OFF": {
-    "freq": "daily",          # ★照實填★ 它決定 partition 與 {date} 的格式
-    "manual_only": True,      # ← 只有這行決定「要不要自動觸發」
-    "input_folder": "...",
-    "template": "T_ONE_OFF_{date}.csv",
-    ...
-},
-```
-
-設 `manual_only=True` 之後：
-
-| 觸發途徑 | 會不會跑 |
-|---|---|
-| `daily_file_watcher_sensor` / `monthly_file_watcher_sensor` | ✗ 迴圈一開始就 `continue` |
-| `db_sync_watcher_sensor`（db_sync 線同旗標） | ✗ |
-| `__DAILY_ASSET_JOB` / `__MONTHLY_ASSET_JOB` | ✗ 已從兩個 job 的選集扣掉 |
-| `automation_sensor` | ✗ EL / db_sync 的節點本來就沒有 `AutomationCondition`，不受它管 |
-| UI 上點該 asset → Materialize / Backfill | **✓ 唯一入口** |
-
-**不要改用「不填 `freq`」來達成同樣效果。** 兩者都會讓 sensor 撈不到，但少填 `freq` 會連帶把 partition 變成月檔、`{date}` 變成 `YYYYMM`，檔名對不上、partition 也只能選每月 1 號。`manual_only` 只關掉觸發，其他行為完全不變。
-
-實作位置（要改行為時看這幾處）：
-
-| 檔案 | 做什麼 |
-|---|---|
-| `sensors.py::_watch_files_and_build_requests` | 迴圈開頭 `if config.get("manual_only", False): continue` |
-| `db_sync/sensors.py::db_sync_watcher_sensor` | 同上 |
-| `selections.py::build_manual_only_selection` | 組出這些表所有節點的 asset key |
-| `__init__.py` | 兩個 job 的 selection 都減掉 `manual_only_selection` |
-
-> ⚠️ `selections.py::build_el_asset_keys` 是照 config 重新推算「這張表有哪些節點」，條件必須跟 `assets.py::build_table_assets` 一致。**日後在 `build_table_assets` 新增節點，這裡要一起加**，否則新節點不會被排除在批次 job 之外。
-
-**匯出（`SQL_TO_CSV_MAPPING`）目前沒有這個旗標**：Export asset 是靠 `AutomationCondition.eager()` 自動帶起的，要做成手動專用得把該 asset 的 `automation_condition` 拿掉，跟這裡的機制不同。需要的話再說。
 
 ---
 
@@ -749,8 +710,7 @@ Snapshot 一定是月頻（`CustomDbtTranslator.get_partitions_def` 對 `resourc
 | `output_folder` | str | 同 `input_folder` | 否 | 清洗輸出目錄 |
 | `error_log_dir` | str | `<output_folder>/bcp_error_logs` | 否 | BCP 錯誤 log 目錄 |
 | `template` | str | 無 | **是** | 本地標準檔名模板，必須含 `{date}` |
-| `freq` | `"daily"` \| `"monthly"` | 無 | **是** | 決定 partition 定義、日期格式、group、由哪支 sensor 監控。⚠️ **不要用「不填 freq」來達成手動專用**，那會讓 partition 變成月檔、`{date}` 變成 `YYYYMM`，檔名直接對不上；要手動專用請用下面的 `manual_only` |
-| `manual_only` | bool | `False` | 否 | `True` 代表這張表**完全不自動觸發**：sensor 跳過、`__DAILY_ASSET_JOB` / `__MONTHLY_ASSET_JOB` 也不涵蓋，只能在 UI 上單獨 materialize 或 backfill。`freq` 仍要照實填 |
+| `freq` | `"daily"` \| `"monthly"` | 無 | **是（實務上必填）** | 決定 partition 定義、日期格式、group、由哪支 sensor 監控。⚠️ 不填會出現不一致狀態：partition 變成 monthly（`freq == "daily"` 才給 daily），group 卻是 `extract_load`，而且兩支 sensor 都用 `config.get("freq") != freq` 過濾 → **這張表永遠不會被自動觸發** |
 | `delimiter` | str | `","` | 否 | CSV 分隔符 |
 | `use_data_rule` | bool | `False` | 否 | 建立 `*_named` 節點，依檔規補欄位名 |
 | `data_rule_sheet` | str | 表名 | 否 | 檔規 sheet 名稱與表名不同時指定 |
@@ -806,7 +766,6 @@ Snapshot 一定是月頻（`CustomDbtTranslator.get_partitions_def` 對 `resourc
 | `delimiter` | str | `"\|"` | 否 | 中繼 CSV 分隔符 |
 | `retries` / `retry_delay_sec` | int | `0` / `60` | 否 | 重試設定 |
 | `archive_dir` | str | 無 | **是** | 封存目錄（相對路徑會接在 `/run/media/root/D/data/` 後） |
-| `manual_only` | bool | `False` | 否 | `True` 代表不輪詢來源 DB，只能手動 materialize（同 EL 線的旗標） |
 
 模組層常數：`DB_SYNC_STABLE_SECONDS = 300`（筆數要穩定多久）、`DB_SYNC_STALL_WARN_SECONDS = 7200`（超時警告）。
 
@@ -846,7 +805,7 @@ Snapshot 一定是月頻（`CustomDbtTranslator.get_partitions_def` 對 `resourc
 | `type` | `sqlserver` | 需要 `dbt-sqlserver` adapter |
 | `driver` | `ODBC Driver 18 for SQL Server` | image 內必須裝好 |
 | `server` / `port` / `database` / `schema` | `10.10.20.92` / `1433` / `DDEQDTAI` / `dbo` | 連線目標 |
-| `user` / `password` | `{{ env_var('DBT_DB_USER') }}` / `{{ env_var('DBT_DB_PASSWORD') }}` | **不寫明碼**，由環境變數帶入；VM4 上要確保 dbt 容器讀得到這兩個變數（見 §13.4） |
+| `user` / `password` | 明碼 | ⚠️ 見 §13.4 |
 | `encrypt` / `trust_cert` | `true` / `true` | 內網自簽憑證需要 |
 
 執行時另有兩處指定 profile 位置：`docker_pipes` 的 `env={"DBT_PROFILES_DIR": "/app/workspace/dbt_project"}`，以及指令尾巴的 `--profiles-dir .`（working dir 就是 dbt 專案根）。
@@ -940,30 +899,9 @@ Dagster UI → **Deployment → Code locations → 右側 Reload**。
 
 `selections.py` 用 `AssetKey([node["name"]])` 組月檔選集，但 snapshot 設了 `target_schema='snapshots'`，dagster-dbt 預設會把 config 裡的 schema 併進 asset key。若某天發現 `__MONTHLY_ASSET_JOB` 選不到 snapshot、或 UI 上 snapshot 的 key 是 `snapshots/snp_cust`，這裡就是第一個要檢查的地方。
 
-### 13.4 `profiles.yml` 的帳密改由環境變數帶入
+### 13.4 `profiles.yml` 有明碼密碼
 
-`dbt_project/profiles.yml` 曾經把 SQL Server 帳密明碼寫在檔案裡並進了版控，現已改成：
-
-```yaml
-      user: "{{ env_var('DBT_DB_USER') }}"
-      password: "{{ env_var('DBT_DB_PASSWORD') }}"
-```
-
-值的來源是既有的 `dagster_code/.env`：`assets.py` 讀進 `DB_USER` / `DB_PASS` 之後，透過 `docker_pipes` 的 `env=` 傳進 dbt 容器：
-
-```python
-docker_pipes = PipesDockerClient(
-    env={
-        "DBT_PROFILES_DIR": "/app/workspace/dbt_project",
-        "DBT_DB_USER": DB_USER or "",
-        "DBT_DB_PASSWORD": DB_PASS or "",
-    }
-)
-```
-
-所以**不需要新增任何機密管理機制，只要 `dagster_code/.env` 裡的 `DB_USER` / `DB_PASS` 是對的即可**（BCP 節點的 partition/index DDL 本來就在用同一組）。若 `.env` 沒設好，dbt 會在 profile 解析階段失敗，訊息類似 `Env var required but not provided: 'DBT_DB_PASSWORD'`。
-
-> ⚠️ **舊的那組密碼必須視為已外洩並輪換**。它曾經 commit 進版控並推上遠端，改寫歷史只能讓它從分支上消失，無法保證沒有人已經取得副本。
+`dbt_project/profiles.yml` 目前把 SQL Server 帳密明碼寫在檔案裡並進了版控。dbt 原生支援 `{{ env_var('DBT_DB_PASSWORD') }}`，建議改成從環境變數讀，並輪換一次現有密碼。
 
 ### 13.5 `assets.py` FTP 節點的例外處理路徑有未定義名稱
 
