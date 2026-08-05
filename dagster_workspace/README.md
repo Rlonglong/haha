@@ -20,8 +20,9 @@
 
 ## 資料夾結構
 
-> ⚠️ **路徑對照**：本資料夾 `dagster_workspace/` 就是容器裡的 `/app/workspace/`，
-> 對應 VM4 主機上的 `/data/deploy/workspace/dagster_workspace/`。
+> ⚠️ **路徑對照**：本資料夾 `dagster_workspace/` 就是容器裡的 `/app/workspace/`
+> （docker 掛載的路徑，**非實際路徑**），對應 VM4 主機上的
+> `/data/deploy/workspace/dagster_workspace/`（**實際掛載路徑**）。
 > 程式碼裡看到 `/app/workspace/xxx`，就是這裡的 `xxx`。
 
 ```
@@ -35,12 +36,12 @@ dagster_workspace/
 │   └── dagster.yaml              ← Dagster 實例設定（併發、log、自動觸發）
 │
 ├── dagster_code/                 ← Dagster 的 Python 程式
-│   ├── __init__.py               ← 總入口：註冊所有 asset / job / sensor / resource
-│   ├── assets.py                 ← 核心：EL 節點工廠、dbt 資產、匯出資產
-│   ├── table_mapping.py          ← 設定檔：來源表(TABLE_CSV_MAPPING)、匯出(SQL_TO_CSV_MAPPING)
-│   ├── sensors.py                ← 檔案到站偵測、失敗告警
-│   ├── selections.py             ← 動態組出「月檔」「手動專用」的資產集合
-│   ├── pipes_ssh_client.py       ← SSH 到 VM1 執行腳本的連線元件
+│   ├── __init__.py               ← <常態不需要改> 總入口：註冊 asset / job / sensor / resource
+│   ├── assets.py                 ← <常態不需要改> 核心：EL 節點工廠、dbt 資產、匯出資產
+│   ├── table_mapping.py          ← ★最常改的檔案★ 來源表(TABLE_CSV_MAPPING)、匯出(SQL_TO_CSV_MAPPING)
+│   ├── sensors.py                ← <常態不需要改> 檔案到站偵測、失敗告警
+│   ├── selections.py             ← <常態不需要改> 動態組出「月檔」「手動專用」的資產集合
+│   ├── pipes_ssh_client.py       ← <常態不需要改> SSH 到 VM1 執行腳本的連線元件
 │   ├── .env                      ← ★不進版控★ 資料庫連線帳密
 │   └── db_sync/                  ← DB 直連同步線（跟檔案線平行的另一套）
 │       ├── config.py             ← 設定檔：DB_SYNC_MAPPING
@@ -49,7 +50,7 @@ dagster_workspace/
 │
 └── dbt_project/                  ← dbt 專案（SQL 轉換邏輯）
     ├── dbt_project.yml           ← dbt 專案設定
-    ├── profiles.yml              ← 資料庫連線（帳密走環境變數，不寫明碼）
+    ├── profiles.yml              ← ★未進版控★ 資料庫連線（帳密走環境變數，不寫明碼）
     ├── models/
     │   ├── sources.yml           ← ★所有 dbt 要用的來源表都要在這裡登記★
     │   ├── _groups.yml           ← 群組與負責人
