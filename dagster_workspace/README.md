@@ -51,6 +51,7 @@ dagster_workspace/
 └── dbt_project/                  ← dbt 專案（SQL 轉換邏輯）
     ├── dbt_project.yml           ← dbt 專案設定
     ├── profiles.yml              ← ★未進版控★ 資料庫連線（帳密走環境變數，不寫明碼）
+    ├── profiles.yml.example      ← 上面那份的範本，新環境複製一份改名即可
     ├── models/
     │   ├── sources.yml           ← ★所有 dbt 要用的來源表都要在這裡登記★
     │   ├── _groups.yml           ← 群組與負責人

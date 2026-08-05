@@ -1,0 +1,99 @@
+# ==============================================================================
+# 機密資訊：絕對不能進版控
+# ==============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+
+# dbt 的連線設定（含帳密），由各環境自行保留一份
+# 需要範本請看 dbt_project/profiles.yml.example
+dagster_workspace/dbt_project/profiles.yml
+
+
+# ==============================================================================
+# dbt 產出物：執行後才生成，不需要版控
+# ==============================================================================
+# 編譯結果、manifest.json、run_results.json 等
+dagster_workspace/dbt_project/target/
+dagster_workspace/dbt_project/logs/
+dagster_workspace/dbt_project/dbt_packages/
+# 增量解析的快取
+**/partial_parse.msgpack
+
+
+# ==============================================================================
+# Dagster 執行期產物
+# ==============================================================================
+# 本機跑起來時的儲存目錄（event log、run storage）
+dagster_workspace/dagster_home/storage/
+dagster_workspace/dagster_home/history/
+dagster_workspace/dagster_home/schedules/
+dagster_workspace/dagster_home/logs/
+tmp*/
+.tmp_dagster_home*/
+
+
+# ==============================================================================
+# Python
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虛擬環境
+venv/
+.venv/
+env/
+ENV/
+
+# 測試與型別檢查快取
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+
+# ==============================================================================
+# Docker image 打包產物（見 PROCESS.md：./images 放 docker save 的壓縮檔）
+# 注意：只忽略「repo 根目錄」的 images/，
+#       手冊裡的截圖資料夾 Dagster維運手冊/日常維運/images/ 不受影響
+# ==============================================================================
+/images/
+*.tar
+*.tar.gz
+
+
+# ==============================================================================
+# 資料檔：不應該出現在 repo 裡
+# ==============================================================================
+*.csv
+*.zip
+*.bak
+# 但文件用的範例資料可以留
+!**/docs/**/*.csv
+
+
+# ==============================================================================
+# 編輯器 / 作業系統
+# ==============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

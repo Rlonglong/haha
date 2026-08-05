@@ -1,0 +1,26 @@
+# dbt 連線設定範本
+#
+# 使用方式：
+#   1. 複製一份為同目錄下的 profiles.yml
+#   2. profiles.yml 已列入 .gitignore，不會進版控
+#   3. 帳密不要寫在這裡，改用環境變數 DBT_DB_USER / DBT_DB_PASSWORD
+#      這兩個變數由 dagster_code/assets.py 從 dagster_code/.env 的
+#      DB_USER / DB_PASS 讀出後，透過 PipesDockerClient 傳進 dbt 容器
+#
+# 最上層的 key（post_office_dbt）必須跟 dbt_project.yml 的
+# name / profile 完全一致，否則 dbt 會連不到資料庫。
+
+post_office_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: sqlserver
+      driver: 'ODBC Driver 18 for SQL Server'
+      server: 10.10.20.92
+      port: 1433
+      database: DDEQDTAI
+      schema: dbo
+      user: "{{ env_var('DBT_DB_USER') }}"
+      password: "{{ env_var('DBT_DB_PASSWORD') }}"
+      encrypt: true
+      trust_cert: true  # 內網通常需要信任憑證
