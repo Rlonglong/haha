@@ -78,11 +78,11 @@ TABLE_CSV_MAPPING = {
         # ==========================================
         # 1. 檔案路徑與基礎設定
         # ==========================================
-        "input_folder": "/run/media/root/D/data/fromFPP/T_TXN_PS",
-        "output_folder": "/run/media/root/D/data/T_TXN_PS/T_TXN_PS_CLEANED",
+        "input_folder": "/run/media/root/D/data/fromFPP/T_CUST",
+        "output_folder": "/run/media/root/D/data/T_CUST/T_CUST_CLEANED",
         "template": "T_CUST_{date}.csv",
         "freq": "monthly",
-        "delimiter": "|",
+        "delimiter": "〨",
         "use_data_rule": True,
         # ==========================================
         # 2. 處理邏輯

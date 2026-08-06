@@ -127,10 +127,10 @@
 
 ## Step 3 · VM1 準備
 
-- [ ] 如果有給 `output_folder`:確認目錄存在(`export_remote.py` 是否會自己建目錄請先確認,
-      見 [03_新增一張資料表 · Step 3-4](./03_新增一張資料表.md#3-4-目錄要不要先建))
-- [ ] 如果有給 `ftp_remote_path`:確認 VM1 對該 FTP 路徑有寫入權限
 - [ ] 確認 `decrypt_fields` 裡的欄位名稱**跟資料庫欄位完全一致**(含中文欄位名)
+- [ ] 若走 `ftp_remote_path`:確認 VM1 對該 FTP 路徑有寫入權限
+
+> 輸出目錄**不用自己建**,`export_remote.py` 會自己 `makedirs`。
 
 ---
 
@@ -165,7 +165,7 @@
 [ ] depends_on_dbt_model 用模型檔名
 [ ] 正式上線用 ftp_remote_path，沒有 keep_local_copy
 [ ] decrypt_fields 欄位名稱與資料庫一致
-[ ] VM1 目錄 / FTP 權限確認
+[ ] 若走 FTP：VM1 對該路徑有寫入權限
 [ ] Reload 成功，資產出現在 export_to_csv 群組
 [ ] 手動跑過一次，檔案內容與編碼正確
 [ ] 解密欄位確認是明文
