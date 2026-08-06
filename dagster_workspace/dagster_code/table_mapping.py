@@ -78,11 +78,11 @@ TABLE_CSV_MAPPING = {
         # ==========================================
         # 1. 檔案路徑與基礎設定
         # ==========================================
-        "input_folder": "/run/media/root/D/data/fromFPP/T_TXN_PS",
-        "output_folder": "/run/media/root/D/data/T_TXN_PS/T_TXN_PS_CLEANED",
+        "input_folder": "/run/media/root/D/data/fromFPP/T_CUST",
+        "output_folder": "/run/media/root/D/data/T_CUST/T_CUST_CLEANED",
         "template": "T_CUST_{date}.csv",
         "freq": "monthly",
-        "delimiter": "|",
+        "delimiter": "〨",
         "use_data_rule": True,
         # ==========================================
         # 2. 處理邏輯
@@ -116,17 +116,33 @@ TABLE_CSV_MAPPING = {
     },
     "T_CUST_PS": {
         # ==========================================
+        # 0. ftp 設定
+        # ==========================================
+        "use_ftp_fetch": True,
+        "ftp_remote_dir": "/data/fromFPP/T_CUST_PS/",
+        "ftp_remote_filename_prefix": "T_CUST_PS_{date}",
+    
+        # zip 相關設定
+        "use_ftp_zip": True,
+        # "zip_inner_filename": "EXNP_PSPDC55_PS",
+        "expected_part_count": 8, 
+        "multi_part_start": "A",
+    
+        "staging_subfolder": "T_CUST_PS",
+        "archive_dir": "/run/media/root/D/data/archive/T_CUST_PS",
+        # ==========================================
         # 1. 檔案路徑與基礎設定
         # ==========================================
         "input_folder": "/run/media/root/D/data/fromFPP/T_CUST_PS",
         "output_folder": "/run/media/root/D/data/T_CUST_PS/T_CUST_PS_CLEANED",
         "template": "T_CUST_PS_{date}.csv",
         "freq": "monthly",
-        "delimiter": "|",
+        "delimiter": "〨",
+        "use_data_rule": True,
         # ==========================================
         # 2. 處理邏輯
         # ==========================================
-        # "has_clean_func": True,
+        "has_clean_func": True,
         # ==========================================
         # 3. 容錯機制
         # ==========================================
@@ -135,19 +151,23 @@ TABLE_CSV_MAPPING = {
         # ==========================================
         # 4. BCP 目標
         # ==========================================
-        # "bcp_target": None,
+        "bcp_target": "v_BCP_T_CUST_PS",
         # ==========================================
         # 5. Index 管理
         # ==========================================
-        # "use_index": False,
+        "use_index": False,
         # "index_name": "IX_T_CUST_PS",
         # ==========================================
         # 6. Partition 管理
         # ==========================================
-        # "use_partition": False,
-        # "partition_function": "",
-        # "retention_years": None,
-        # "archive_table": "",
+        "use_partition": True,
+        "partition_function": "pf_CUST_PS_Monthly",
+        "retention_years": 2,
+        "archive_table": "T_CUST_PS_Archive",
+        # ==========================================
+        # 7. 加密欄位（預設空清單 = 不加密）
+        # ==========================================
+        "encrypt_fields": ["ACT_NO", "ID"]
     },
     "T_LOW_INCOME_ACCT": {
         # ==========================================
