@@ -348,6 +348,81 @@ WHERE 1=1
 
 ---
 
+## earlyjob 模型:下游要吃「前一天」的上游
+
+這是**日常會遇到的操作**,不是特例,所以寫在這裡。
+
+### 情境
+
+有些來源會**提早在前一天晚上先送一批資料**,我們叫它 earlyjob:
+
+```
+8/1 晚上   earlyjob 檔案先到    →  ATM_C2_earlyjob  跑 partition 2026-08-01
+8/2 早上   正常檔案才到          →  ATM_C2           跑 partition 2026-08-02
+                                     ↑ 它要跟「8/1 晚上那批 earlyjob 的結果」比對
+```
+
+也就是說,`ATM_C2` 在跑 `2026-08-02` 這一格時,要的是 `ATM_C2_earlyjob` 的
+**`2026-08-01`** 那一格,不是同一天。
+
+**如果不特別設定,Dagster 預設是「同一天對同一天」**,`ATM_C2` 的 8/2 會去等
+`ATM_C2_earlyjob` 的 8/2——但那批資料要到 8/2 晚上才會有,於是下游就卡住了。
+
+### 怎麼設定
+
+在 `dagster_code/assets.py` 的 `PREV_DAY_DEPS` 加一行就好:
+
+```python
+PREV_DAY_DEPS = {
+    ("ATM_C2", "ATM_C2_earlyjob"),
+    ("ATM_E2", "ATM_E2_earlyjob"),
+    ("你的下游模型", "你的上游 earlyjob 模型"),   # ← 加這行
+}
+```
+
+**格式是 `(下游模型, 上游模型)`,名稱一律用 model 檔名**(不是 alias)。
+
+登記之後,這組配對會自動套用:
+
+```python
+TimeWindowPartitionMapping(
+    start_offset=-1,                              # 上游往前挪一天
+    end_offset=-1,
+    allow_nonexistent_upstream_partitions=True,   # 那天沒有 earlyjob 也不擋住下游
+)
+```
+
+`allow_nonexistent_upstream_partitions=True` 很重要:**earlyjob 不一定每天都有**,
+沒有的日子不應該讓正常的模型跟著停擺。
+
+### 新增一組 earlyjob 的完整步驟
+
+```
+1. 建 XXX_earlyjob.sql          ← 處理提早到的那批資料
+2. 建 XXX.sql                   ← 正常模型，用 {{ ref('XXX_earlyjob') }} 引用它
+3. assets.py 的 PREV_DAY_DEPS 加一行 ("XXX", "XXX_earlyjob")
+4. （通常還會）在 SQL_TO_CSV_MAPPING 加兩個匯出：
+      XXX_EXPORT           depends_on_dbt_model: "XXX"
+      XXX_earlyjob_EXPORT  depends_on_dbt_model: "XXX_earlyjob"
+5. push → CI/CD → Reload definitions
+```
+
+### 驗證有沒有生效
+
+Reload 之後到 **Catalog → 下游模型 → Lineage 分頁 → Upstream**,
+點上游的 earlyjob 節點,確認它指到的是**前一天**那一格。
+
+更直接的驗證方式:手動 materialize 下游模型的某一天,看它會不會因為
+「同一天的 earlyjob 還沒跑」而卡住——正確設定的話**不會卡**。
+
+> ⚠️ 這是**日常維運裡少數需要動 `assets.py` 的地方**。改完記得語法檢查:
+> ```bash
+> python3 -m py_compile /app/workspace/dagster_code/assets.py
+> ```
+> 更完整的分區調整說明見 [11_Partition與日期區間](../進階調整/11_Partition與日期區間.md)。
+
+---
+
 ## ⚠️ 目前的限制:不能新增「月頻的一般模型」
 
 月線執行的指令固定是 `dbt snapshot`,只會跑快照。

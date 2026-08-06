@@ -702,6 +702,23 @@ def build_table_assets(table_name: str, config: dict):
 
 from dagster import TimeWindowPartitionMapping
 
+
+# ==============================================================================
+# earlyjob：下游要吃「前一天」的上游 partition
+# ------------------------------------------------------------------------------
+# earlyjob 模型處理的是前一天晚上就先送到的資料，正常模型隔天早上才跑，
+# 而且要跟前一天晚上那批 earlyjob 的結果比對，所以下游對這個上游要往前挪一天。
+#
+# 新增一組 earlyjob 配對時，只要在這裡加一行 (下游模型, 上游模型) 即可，
+# 不需要動 get_partition_mapping 的邏輯。
+# 名稱一律用 model 的「檔名」（不是 alias）。
+# ==============================================================================
+PREV_DAY_DEPS = {
+    ("ATM_C2", "ATM_C2_earlyjob"),
+    ("ATM_E2", "ATM_E2_earlyjob"),
+}
+
+
 class CustomDbtTranslator(DagsterDbtTranslator):
     def get_automation_condition(self, dbt_resource_props):
         return AutomationCondition.eager().without(
@@ -717,24 +734,17 @@ class CustomDbtTranslator(DagsterDbtTranslator):
 
     def get_partition_mapping(self, dbt_resource_props, dbt_parent_resource_props):
         """
-        指定特定的 downstream model 對特定 upstream model 用前一天的 partition。
-        其他情況用預設（同一天）。
+        PREV_DAY_DEPS 裡登記的 (下游, 上游) 配對，下游會吃前一天的上游 partition。
+        其他情況用預設（同一天對同一天）。
         """
         downstream_name = dbt_resource_props.get("name", "")
         upstream_name = dbt_parent_resource_props.get("name", "")
 
-        # 你的 model 名稱對應前一天的 ATM_C2_earlyjob
-        if downstream_name == "ATM_C2" and upstream_name == "ATM_C2_earlyjob":
+        if (downstream_name, upstream_name) in PREV_DAY_DEPS:
             return TimeWindowPartitionMapping(
                 start_offset=-1,
                 end_offset=-1,
-                allow_nonexistent_upstream_partitions=True,
-            )
-
-        if downstream_name == "ATM_E2" and upstream_name == "ATM_E2_earlyjob":
-            return TimeWindowPartitionMapping(
-                start_offset=-1,
-                end_offset=-1,
+                # 上游那天沒有 earlyjob 資料時不擋住下游
                 allow_nonexistent_upstream_partitions=True,
             )
 

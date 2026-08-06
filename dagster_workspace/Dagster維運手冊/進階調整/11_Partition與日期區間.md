@@ -44,27 +44,41 @@ formatted_date = partition_date.replace("-", "") if freq == "daily" else partiti
 | `"daily"` | `2026-08-01` | `20260801` |
 | `"monthly"` / 沒填 | `2026-08-01`(固定 1 號) | `202608` |
 
-### 1-3 上下游差一天的特例
+### 1-3 上下游差一天的特例(earlyjob)
 
-有兩對模型是「今天的結果要吃昨天的上游」:
+有些來源會提早在前一天晚上先送一批資料(earlyjob),隔天早上才送正常的那批。
+正常模型要跟前一天晚上的 earlyjob 結果比對,所以**下游要吃前一天的上游 partition**。
+
+這些配對登記在 `assets.py` 的 `PREV_DAY_DEPS`:
 
 ```python
-# assets.py，CustomDbtTranslator.get_partition_mapping
-        if downstream_name == "ATM_C2" and upstream_name == "ATM_C2_earlyjob":
+PREV_DAY_DEPS = {
+    ("ATM_C2", "ATM_C2_earlyjob"),
+    ("ATM_E2", "ATM_E2_earlyjob"),
+}
+```
+
+`CustomDbtTranslator.get_partition_mapping` 只做一件事——查表:
+
+```python
+    def get_partition_mapping(self, dbt_resource_props, dbt_parent_resource_props):
+        downstream_name = dbt_resource_props.get("name", "")
+        upstream_name = dbt_parent_resource_props.get("name", "")
+
+        if (downstream_name, upstream_name) in PREV_DAY_DEPS:
             return TimeWindowPartitionMapping(
                 start_offset=-1,
                 end_offset=-1,
                 allow_nonexistent_upstream_partitions=True,
             )
 
-        if downstream_name == "ATM_E2" and upstream_name == "ATM_E2_earlyjob":
-            return TimeWindowPartitionMapping(...)
+        return None
 ```
 
 | 參數 | 意思 |
 |---|---|
 | `start_offset=-1` / `end_offset=-1` | 上游往前挪一格(前一天) |
-| `allow_nonexistent_upstream_partitions=True` | 上游那天沒資料也不擋住下游 |
+| `allow_nonexistent_upstream_partitions=True` | 上游那天沒資料也不擋住下游(**earlyjob 不一定每天都有**) |
 
 其他所有相依都是預設的「同一天對同一天」。
 
@@ -118,42 +132,23 @@ end_offset=1    →    end_offset=0
 
 ---
 
-### 調整 C:新增一組「上游取前一天」的特例
+### 調整 C:新增一組「上游取前一天」的配對
 
-在 `CustomDbtTranslator.get_partition_mapping` 裡照著現有的兩段加:
-
-```python
-        if downstream_name == "你的下游模型" and upstream_name == "你的上游模型":
-            return TimeWindowPartitionMapping(
-                start_offset=-1,
-                end_offset=-1,
-                allow_nonexistent_upstream_partitions=True,
-            )
-```
-
-名稱用**模型檔名**(不是 alias)。
-
-如果特例越來越多,建議改成資料表驅動:
+在 `PREV_DAY_DEPS` 加一行就好,**不需要動 `get_partition_mapping` 的邏輯**:
 
 ```python
-    # 檔案上方定義
-    PREV_DAY_DEPS = {
-        ("ATM_C2", "ATM_C2_earlyjob"),
-        ("ATM_E2", "ATM_E2_earlyjob"),
-        ("新下游", "新上游"),
-    }
-
-    # 函式裡
-    def get_partition_mapping(self, dbt_resource_props, dbt_parent_resource_props):
-        downstream_name = dbt_resource_props.get("name", "")
-        upstream_name = dbt_parent_resource_props.get("name", "")
-        if (downstream_name, upstream_name) in PREV_DAY_DEPS:
-            return TimeWindowPartitionMapping(
-                start_offset=-1, end_offset=-1,
-                allow_nonexistent_upstream_partitions=True,
-            )
-        return None
+PREV_DAY_DEPS = {
+    ("ATM_C2", "ATM_C2_earlyjob"),
+    ("ATM_E2", "ATM_E2_earlyjob"),
+    ("新下游模型", "新上游模型"),        # ← 加這行
+}
 ```
+
+名稱用 **model 檔名**(不是 alias)。順序是 `(下游, 上游)`,寫反了不會報錯,
+但也不會生效——Reload 之後記得到 Lineage 分頁確認。
+
+> 這是日常會遇到的操作,完整步驟(含要不要一起加匯出)見
+> [04 · earlyjob 模型](../日常維運/04_新增一支dbt模型.md#earlyjob-模型下游要吃前一天的上游)。
 
 ---
 
