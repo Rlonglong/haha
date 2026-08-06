@@ -36,15 +36,8 @@ post_office_dbt = DbtProject(
     project_dir=DBT_PROJECT_DIR,
 )
 
-docker_pipes = PipesDockerClient(
-    env={"DBT_PROFILES_DIR": "/app/workspace/dbt_project"}
-)
-
-daily_partitions = DailyPartitionsDefinition(start_date="2026-01-01", end_offset=1)
-monthly_partitions = MonthlyPartitionsDefinition(start_date="2026-01-01", end_offset=1)
-
 # ==============================================================================
-# 1. 【EL 階段】讀取 CSV 並寫入 MSSQL
+# DB 連線資訊一律從 .env 讀，不寫死在程式或 profiles.yml 裡
 # ==============================================================================
 env_path = '/app/workspace/dagster_code/.env'
 load_dotenv(dotenv_path=env_path)
@@ -53,6 +46,23 @@ DB_SERVER = os.getenv("DB_SERVER")
 DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
+
+# profiles.yml 用 {{ env_var('DBT_DB_USER') }} / {{ env_var('DBT_DB_PASSWORD') }}
+# 取帳密，這裡把 .env 裡同一組值傳進 dbt 容器，避免明碼落在版控裡。
+docker_pipes = PipesDockerClient(
+    env={
+        "DBT_PROFILES_DIR": "/app/workspace/dbt_project",
+        "DBT_DB_USER": DB_USER or "",
+        "DBT_DB_PASSWORD": DB_PASS or "",
+    }
+)
+
+daily_partitions = DailyPartitionsDefinition(start_date="2026-01-01", end_offset=1)
+monthly_partitions = MonthlyPartitionsDefinition(start_date="2026-01-01", end_offset=1)
+
+# ==============================================================================
+# 1. 【EL 階段】讀取 CSV 並寫入 MSSQL
+# ==============================================================================
 
 CONTAINER_DATA_DIR = "/run/media/root/D/data/"
 
@@ -231,14 +241,17 @@ def build_table_assets(table_name: str, config: dict):
         def _fetch_ftp_asset(context: AssetExecutionContext, ssh_pipes: PipesSSHClient) -> MaterializeResult:
             partition_date = context.partition_key
             formatted_date = partition_date.replace("-", "") if freq == "daily" else partition_date.replace("-", "")[:6]
-
+ 
             actual_csv_name = csv_filename_template.format(date=formatted_date)
-
+ 
+            # zip 模式跟非 zip 模式，最終落地的檔名都一樣是 actual_csv_name，
+            # 差別只在於中間有沒有多一道「下載 zip -> 解壓縮」的手續，
+            # 這道手續完全交給 fetch_ftp_remote.py 在 VM1 上處理。
             if encrypt_fields:
                 local_path = f"~/{staging_subfolder}/{actual_csv_name}"
             else:
                 local_path = os.path.join(in_dir, actual_csv_name)
-
+ 
             command = [
                 "python3.11", "/home/bcp_runner/scripts/fetch_ftp_remote.py",
                 "--local-path", local_path,
@@ -249,7 +262,7 @@ def build_table_assets(table_name: str, config: dict):
                 # 遇到後方帶有隨機時間戳的情況，改用 prefix 模糊比對
                 multi_part_prefix = f"{table_name}_{{part}}_{formatted_date}"
                 multi_part_ext = ".zip" if use_ftp_zip else ".csv"
-                
+
                 # 若有明確清單，以清單長度為最終預期數量
                 actual_expected_count = expected_part_count if expected_part_count > 1 else len(multi_part_list)
 
@@ -259,15 +272,16 @@ def build_table_assets(table_name: str, config: dict):
                     "--multi-part-ext", multi_part_ext,
                     "--part-start", str(multi_part_start)
                 ]
-                
+
                 if multi_part_list:
                     command += ["--part-list", ",".join(str(p) for p in multi_part_list)]
 
                 if ftp_remote_dir:
                     command += ["--ftp-remote-dir", ftp_remote_dir]
-                
+
                 context.log.info(f"啟動多檔合併下載：預期 {actual_expected_count} 檔 -> 合併為單一 {local_path}")
             elif ftp_remote_dir:
+                # 目錄+前綴模式：遠端檔名有 timestamp，交給 remote script 自己去 list 配對
                 formatted_prefix = ftp_remote_filename_prefix.format(date=formatted_date)
                 command += [
                     "--ftp-remote-dir", ftp_remote_dir,
@@ -278,23 +292,24 @@ def build_table_assets(table_name: str, config: dict):
                 remote_path = ftp_remote_template.format(date=formatted_date)
                 command += ["--remote-path", remote_path]
                 context.log.info(f"透過 SSH 從 FTP 下載: {remote_path} -> {local_path}")
-
+ 
             if use_ftp_zip:
                 command += ["--zip-password-env-key", zip_password_env_key]
                 if zip_inner_filename:
                     command += ["--zip-inner-filename", zip_inner_filename]
-
+ 
             try:
                 result = ssh_pipes.run(context=context, command=command)
             except PipesSubprocessError as e:
+                # 捕捉到我們自己定義的 99 (檔案未齊全)
                 if getattr(e, "exit_code", None) == 99:
                     context.log.info("FTP 檔案尚未到齊，本次排程安全略過 (Skip)")
                     return SkipReason("FTP 檔案尚未到齊")
-                raise 
+                raise # 其他非預期的系統錯誤照常報錯
 
             context.log.info("✅ FTP 下載完成")
             return result.get_results()
-
+ 
         assets_for_this_table.append(_fetch_ftp_asset)
 
     # ==========================================
@@ -700,6 +715,25 @@ def build_table_assets(table_name: str, config: dict):
 
 from dagster import TimeWindowPartitionMapping
 
+
+# ==============================================================================
+# earlyjob：下游要吃「前一天」的上游 partition
+# ------------------------------------------------------------------------------
+# earlyjob 模型處理的是前一天晚上就先送到的資料，正常模型隔天早上才跑，
+# 而且要跟前一天晚上那批 earlyjob 的結果比對，所以下游對這個上游要往前挪一天。
+#
+# 新增一組 earlyjob 配對時，只要在這裡加一行 (下游模型, 上游模型) 即可，
+# 不需要動 get_partition_mapping 的邏輯。
+# 名稱一律用 model 的「檔名」（不是 alias）。
+# ==============================================================================
+PREV_DAY_DEPS = {
+    ("ATM_C2", "ATM_C2_earlyjob"),
+    ("ATM_E2", "ATM_E2_earlyjob"),
+    ("ATM_A2", "ATM_A2_earlyjob"),
+    ("ATM_F", "ATM_F_earlyjob"),
+}
+
+
 class CustomDbtTranslator(DagsterDbtTranslator):
     def get_automation_condition(self, dbt_resource_props):
         return AutomationCondition.eager().without(
@@ -715,38 +749,17 @@ class CustomDbtTranslator(DagsterDbtTranslator):
 
     def get_partition_mapping(self, dbt_resource_props, dbt_parent_resource_props):
         """
-        指定特定的 downstream model 對特定 upstream model 用前一天的 partition。
-        其他情況用預設（同一天）。
+        PREV_DAY_DEPS 裡登記的 (下游, 上游) 配對，下游會吃前一天的上游 partition。
+        其他情況用預設（同一天對同一天）。
         """
         downstream_name = dbt_resource_props.get("name", "")
         upstream_name = dbt_parent_resource_props.get("name", "")
 
-        # 你的 model 名稱對應前一天的 ATM_C2_earlyjob
-        if downstream_name == "ATM_C2" and upstream_name == "ATM_C2_earlyjob":
+        if (downstream_name, upstream_name) in PREV_DAY_DEPS:
             return TimeWindowPartitionMapping(
                 start_offset=-1,
                 end_offset=-1,
-                allow_nonexistent_upstream_partitions=True,
-            )
-
-        if downstream_name == "ATM_E2" and upstream_name == "ATM_E2_earlyjob":
-            return TimeWindowPartitionMapping(
-                start_offset=-1,
-                end_offset=-1,
-                allow_nonexistent_upstream_partitions=True,
-            )
-
-        if downstream_name == "ATM_A2" and upstream_name == "ATM_A2_earlyjob":
-            return TimeWindowPartitionMapping(
-                start_offset=-1,
-                end_offset=-1,
-                allow_nonexistent_upstream_partitions=True,
-            )
-
-        if downstream_name == "ATM_F" and upstream_name == "ATM_F_earlyjob":
-            return TimeWindowPartitionMapping(
-                start_offset=-1,
-                end_offset=-1,
+                # 上游那天沒有 earlyjob 資料時不擋住下游
                 allow_nonexistent_upstream_partitions=True,
             )
 
@@ -853,6 +866,28 @@ def build_export_assets(table_name: str, config: dict):
             "--start-date", start_date.isoformat(),
             "--end-date", end_date.isoformat(),
         ]
+
+        # ------------------------------------------------------------
+        # 落地策略
+        # 匯出的名單是「解密後的明文」，能不落地就不要落地。
+        # 有設 ftp_remote_path 代表要直接送 FTP，此時預設不寫本機檔案；
+        # 只有明確設 keep_local_copy=True（測試用）才會同時落地，而且會
+        # 在 log 留下警告，避免有人測完忘記關掉。
+        # ------------------------------------------------------------
+        keep_local_copy = config.get("keep_local_copy", False)
+
+        if ftp_remote_path and remote_csv_path:
+            if keep_local_copy:
+                context.log.warning(
+                    f"⚠️ keep_local_copy=True：解密後的明文 CSV 會同時留在 VM1 "
+                    f"（{remote_csv_path}），僅供測試，上線前請移除此設定"
+                )
+            else:
+                context.log.info(
+                    f"已設定 ftp_remote_path，直接送 FTP 不落地，"
+                    f"忽略 output_folder（{output_folder}）"
+                )
+                remote_csv_path = None
 
         if remote_csv_path:
             command.extend(["--output", remote_csv_path])

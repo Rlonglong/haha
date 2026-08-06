@@ -130,11 +130,14 @@ def _build_cursor(last_run_ts: float, processed_keys: set) -> str:
 DBT_PROJECT_DIR = Path("/app/workspace/dbt_project")
 post_office_dbt = DbtProject(project_dir=DBT_PROJECT_DIR)
 
-# 將 dbt 的月檔與 Python 的月檔群組聯集起來
-monthly_selection = (
-    build_monthly_selection(post_office_dbt.manifest_path) |
-    AssetSelection.groups("monthly_extract_load")
-)
+# 將 dbt 的月檔與 Python 的月檔群組聯集起來。
+# build_monthly_selection 沒有任何月檔節點時回傳 None，
+# 此時月檔選集只剩下 monthly_extract_load 這個 group。
+_monthly_keys_selection = build_monthly_selection(post_office_dbt.manifest_path)
+monthly_selection = AssetSelection.groups("monthly_extract_load")
+
+if _monthly_keys_selection is not None:
+    monthly_selection = _monthly_keys_selection | monthly_selection
 
 daily_selection = AssetSelection.all() - monthly_selection
 
@@ -156,6 +159,11 @@ def _watch_files_and_build_requests(
     requests = []
 
     for table_name, config in TABLE_CSV_MAPPING.items():
+        # manual_only 的表完全不進 sensor：只能在 UI 上手動 materialize / backfill。
+        # 注意這跟「freq 沒填」不一樣 —— freq 還是要照實填，才不會讓 partition
+        # 與檔名日期格式跑掉；要不要自動觸發交給這個旗標決定。
+        if config.get("manual_only", False):
+            continue
         if config.get("freq") != freq:
             continue
 
