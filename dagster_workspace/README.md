@@ -13,7 +13,7 @@
 | 新增一張來源資料表 | [日常維運/03_新增一張資料表.md](./Dagster維運手冊/日常維運/03_新增一張資料表.md) |
 | 新增一支 dbt 模型（SQL） | [日常維運/04_新增一支dbt模型.md](./Dagster維運手冊/日常維運/04_新增一支dbt模型.md) |
 | 改 sensor 幾秒掃一次 | [進階調整/10_Sensor掃描頻率與觸發邏輯.md](./Dagster維運手冊/進階調整/10_Sensor掃描頻率與觸發邏輯.md) |
-| 查某個設定值是什麼意思 | [進階調整/16_設定值總表.md](./Dagster維運手冊/進階調整/16_設定值總表.md) |
+| 查某個設定值是什麼意思 | [附錄A_table_mapping設定詳解.md](./Dagster維運手冊/附錄/A_table_mapping設定詳解.md)(詳解)<br/>[進階調整/16_設定值總表.md](./Dagster維運手冊/進階調整/16_設定值總表.md)(快查) |
 | 系統整體怎麼運作 | [00_系統架構總覽.md](./Dagster維運手冊/00_系統架構總覽.md) |
 
 ---
@@ -58,7 +58,9 @@ dagster_workspace/
     │   ├── intermediate/         ← 中介層（去沖正、淨額表）
     │   └── *.sql                 ← 產出層：37 支詐欺偵測模型
     ├── snapshots/                ← 2 支緩慢變動維度快照
-    ├── macros/                   ← ⚠️ 目前不在版控內，見手冊 17 篇
+    ├── macros/                   ← 共用的 Jinja macro
+    │   ├── anti_fraud/           ← get_config() 代碼註冊表、出入帳判斷式
+    │   └── global/               ← safe_divide 等通用工具
     ├── target/                   ← ★編譯產出★ 不進版控，執行後才生成
     ├── logs/                     ← dbt 自己的執行 log
     └── dbt_packages/             ← dbt 套件（目前無）
@@ -80,15 +82,18 @@ Dagster維運手冊/
 │   ├── 06_新增一張DB直連同步表.md
 │   └── images/                         ← 截圖放這裡
 │
-└── 進階調整/                            ← 要改程式碼才能達成的調整
-    ├── 10_Sensor掃描頻率與觸發邏輯.md
-    ├── 11_Partition與日期區間.md
-    ├── 12_併發_重試_資源池.md
-    ├── 13_dbt執行行為.md
-    ├── 14_連線_路徑_環境變數.md
-    ├── 15_新增或調整處理節點.md
-    ├── 16_設定值總表.md
-    └── 17_疑難排解與已知問題.md
+├── 進階調整/                            ← 要改程式碼才能達成的調整
+│   ├── 10_Sensor掃描頻率與觸發邏輯.md
+│   ├── 11_Partition與日期區間.md
+│   ├── 12_併發_重試_資源池.md
+│   ├── 13_dbt執行行為.md
+│   ├── 14_連線_路徑_環境變數.md
+│   ├── 15_新增或調整處理節點.md
+│   ├── 16_設定值總表.md
+│   └── 17_疑難排解與已知問題.md
+│
+└── 附錄/
+    └── A_table_mapping設定詳解.md        ← 每個設定值的意義、預設、限制與設計理由
 ```
 
 ---
@@ -107,12 +112,15 @@ Dagster維運手冊/
 
 ## 修改後要做什麼
 
-| 改了什麼 | 重產 manifest | Reload code location | 重啟容器 |
+> 程式碼由 **GitLab CI/CD** 同步到 VM4，dbt 的 manifest 也在同步時一併重新產生，
+> 所以正常流程是 **push → 等 pipeline 綠燈 → 到 UI 做 Reload**。
+
+| 改了什麼 | push 後等 CI/CD | Reload definitions | 重啟容器 |
 |---|---|---|---|
-| `table_mapping.py`、`db_sync/config.py` | ✗ | ✓ | ✗ |
-| `assets.py`、`sensors.py`、`selections.py` | ✗ | ✓ | ✗ |
-| dbt model、snapshot、`sources.yml` | **✓** | ✓ | ✗ |
-| `dagster.yaml`、`workspace.yml` | ✗ | ✗ | **✓** |
-| VM1 上的腳本 | ✗ | ✗ | ✗（下次執行就生效） |
+| `table_mapping.py`、`db_sync/config.py` | ✓ | ✓ | ✗ |
+| `assets.py`、`sensors.py`、`selections.py` | ✓ | ✓ | ✗ |
+| dbt model、snapshot、`sources.yml`、`macros/` | ✓（順便重產 manifest） | ✓ | ✗ |
+| `dagster.yaml`、`workspace.yml` | ✓ | ✗ | **✓** |
+| VM1 上的腳本 | 不走這條線，直接改 VM1 | ✗ | ✗（下次執行就生效） |
 
 詳細步驟見 [02_開發人員_UI操作手冊.md](./Dagster維運手冊/日常維運/02_開發人員_UI操作手冊.md)。

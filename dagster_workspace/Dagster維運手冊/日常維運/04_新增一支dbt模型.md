@@ -114,6 +114,120 @@ WHERE TXN_AMT >= 10000
 
 ---
 
+## Step 1-B · 善用 macros,不要自己重打一長串代碼
+
+寫 SQL 之前先看一下 `dbt_project/macros/`,裡面已經把常用的東西包好了。
+
+### 為什麼要有這些 macro
+
+詐欺偵測的條件裡有大量的**交易代碼清單**。以「入帳」為例,它是這樣一串:
+
+```sql
+FUNC_CODE IN ('A401','A403','A503','B403','B415','B425','B437','BB02','1520','5502'
+             ,'5506','5509','1226','1462','1463','1446','1448','E446','E448','E457'
+             ,'E459','E460','E462','E472','E473','E438','14A1','14A3','14AL','14H1'
+             ,'14H8','14X5','E476','E480','E482','E484')
+```
+
+**三十幾個代碼,每寫一支新模型就要重打一次。** 會發生兩件事:
+
+1. **漏打**——少一個代碼,那一類交易就整批被漏掉,而且**不會報錯**,名單少了你也不知道
+2. **改起來要命**——業務端說「新增一個入帳代碼 `E490`」,你得把用到的每一支模型都翻出來改,漏一支就不一致
+
+所以這些清單集中放在 **`macros/anti_fraud/config.sql`** 的 `get_config()` 裡,
+再由 **`macros/anti_fraud/logic.sql`** 包成語意化的判斷式。
+
+**新增或調整一個代碼,只要改 `config.sql` 一個地方,所有用到的模型下次執行就一起生效。**
+
+### `get_config()`:代碼與門檻的註冊表
+
+它回傳一個以**模型代號**為 key 的字典:
+
+```sql
+{% set cfg = get_config()['ATM_C2'] %}
+```
+
+目前已註冊的代號有 `ATM_C2`、`ATM_E2`、`ATM_D`、`ATM_A2`、`ATM_B3`、`3DS_SAVING`、
+`FOREIGN_SMALL`、`VIRTUAL_TRANSACT`、`ATM_G`、`UNLOCK_SCORE`、`ALERT_TRADE_CAR1`、
+`ATM_F`、`ATM_H`、`CTBC_OUTPUT`、`G_LIST`、`ATM_J`、`DAILY_BALANCE`、
+`WARNINGFLG_B_IPDEVICE`、`RISKY_DEVICE_TRACING`、`RISKY_IP_TRACING`、
+`WARNINGFLG_B_COUNTERPARTY`。
+
+常見的 key:
+
+| key | 內容 |
+|---|---|
+| `inward_codes` / `outward_codes` | 入帳 / 出帳的交易代碼清單 |
+| `atm_outward_codes` | ATM 出帳代碼 |
+| `inward_threshold` / `outwardthreshold` | 小額門檻金額 |
+| `exclude_pba_codes` / `nouse_code` | 要排除的帳戶狀態代碼 |
+| `no_control` / `long_time_memos` | 不設控的備註文字(中文,前面要加 `N`) |
+
+直接在 SQL 裡取用:
+
+```sql
+WHERE ISNULL(STATUS_PBA_CODE, '') NOT IN {{ get_config()['ATM_J']['nouse_code'] }}
+```
+
+> 注意值是**已經包好括號的字串**(例如 `"('A401','A403')"`),
+> 所以 `IN` 後面**不要再自己加括號**。
+
+### `logic.sql`:語意化的判斷式
+
+比起自己拼 `DR_FLG` 加一串代碼,直接用包好的:
+
+| macro | 判斷 |
+|---|---|
+| `is_inward_all(model_name)` | 入帳,不排小額 |
+| `is_inward_large(model_name)` | 入帳,且金額 > `inward_threshold` |
+| `is_outward_all(model_name)` | 出帳,不排小額 |
+| `is_outward_large(model_name)` | 出帳,且金額 > `outwardthreshold` |
+| `is_atm_outward_all(model_name)` | ATM 出帳 |
+
+用起來像這樣:
+
+```sql
+SELECT *
+FROM {{ ref('txn_ps_net') }}
+WHERE TABLE_DATE = '{{ target_date }}'
+  AND {{ is_inward_large('ATM_C2') }}
+```
+
+**讀起來就是「ATM_C2 定義的大額入帳」**,不用去看那三十幾個代碼是什麼。
+
+> ⚠️ **兩個要注意的地方**
+>
+> 1. 傳進去的是 **`get_config()` 裡的代號**,不是模型檔名。多數情況一樣,但像
+>    `GSS20250514_Virtual_Txn_Control_List_1` 這支模型用的代號是 `VIRTUAL_TRANSACT`。
+> 2. `is_outward_large` 讀的 key 是 **`outwardthreshold`**(沒有底線),
+>    而 `is_inward_large` 讀的是 **`inward_threshold`**(有底線)。目前只有
+>    `VIRTUAL_TRANSACT` 定義了 `outwardthreshold`,**對其他代號呼叫
+>    `is_outward_large` 會在編譯時出錯**。要用之前先確認 `config.sql` 裡有那個 key。
+
+### `global/` 底下的通用工具
+
+| macro | 用途 |
+|---|---|
+| `safe_divide(分子, 分母, 預設值=0)` | 除法防呆。分母是 0 或 NULL 時回傳預設值,不會炸掉。**算比率一律用它** |
+| `make_temp_relation(...)` | 覆寫 dbt 產生暫存表名稱的方式,把 `invocation_id` 加進表名。**這是為了讓多個 Run 同時跑時暫存表不會撞名**,不需要你手動呼叫 |
+
+```sql
+SELECT {{ safe_divide('OUT_AMT_7D', 'OUT_AMT_180D') }} AS OUT_RATIO
+```
+
+### 什麼時候該新增到 `config.sql`
+
+| 情況 | 做法 |
+|---|---|
+| 業務端要調整某個代碼清單 | 改 `config.sql` 對應的 key,**一次改完全部** |
+| 新模型要用現有的代碼清單 | 直接引用現有代號,**不要複製一份** |
+| 新模型有自己專屬的清單 | 在 `config.sql` 新增一個代號區塊 |
+| 兩支模型的清單完全一樣 | 共用同一個代號,不要各存一份 |
+
+**判斷原則:同一個清單只應該存在於一個地方。** 一旦你發現自己在複製貼上代碼清單,就是該進 `config.sql` 的時候了。
+
+---
+
 ## Step 2 · 如果用到新的來源表,先登記
 
 編輯 `dbt_project/models/sources.yml`,在 `database` 底下加:
@@ -126,70 +240,55 @@ WHERE TXN_AMT >= 10000
 
 ---
 
-## Step 3 · 重新產生 manifest ★最容易漏的一步★
+## Step 3 · 推上 GitLab,讓 CI/CD 同步
 
-Dagster 是讀 `target/manifest.json` 來產生 dbt 資產的。**manifest 沒更新,你的新模型在 UI 上根本不存在。**
+Dagster 是讀 `target/manifest.json` 來產生 dbt 資產的——**manifest 沒更新,你的新模型在 UI 上根本不存在**。
 
-在 VM4 上執行:
+**這件事已經納入 GitLab CI/CD**:程式碼同步到 VM4 的時候,pipeline 會順便重新產生 manifest,你不需要自己下指令。
 
-```bash
-docker run --rm \
-  -v /data/deploy/workspace/dagster_workspace/dbt_project:/app/workspace/dbt_project \
-  -w /app/workspace/dbt_project \
-  --network docker-compose_vm4-network \
-  dai/dagster:v2.6 \
-  dbt parse --profiles-dir .
+所以正常流程就是:
+
+```
+git add models/NEW_MODEL.sql
+git commit -m "新增 NEW_MODEL 模型"
+git push
+      ↓
+GitLab CI/CD 同步程式碼到 VM4 + 重新產生 manifest
+      ↓
+到 Dagster UI 做 Reload（Step 4）
 ```
 
-> 用 `dbt compile` 也可以,而且會順便幫你檢查 SQL 語法、產出編譯後的 SQL 可以直接看。
+**push 之後請確認 pipeline 有跑成功再往下走。** 如果 pipeline 紅了,manifest 就沒更新,後面 Reload 也不會看到新模型。
+
+> 需要手動產生 manifest 的情況(一般不會走到)請看本篇最後的
+> [附註 · 手動產生 manifest 與編譯 SQL](#附註--手動產生-manifest-與編譯-sql)。
 
 ---
 
-## Step 4 · 先看編譯後的 SQL 對不對
+## Step 4 · Reload code location
 
-```bash
-docker run --rm \
-  -v /data/deploy/workspace/dagster_workspace/dbt_project:/app/workspace/dbt_project \
-  -w /app/workspace/dbt_project \
-  --network docker-compose_vm4-network \
-  dai/dagster:v2.6 \
-  dbt compile --select NEW_MODEL --vars '{"target_date": "2026-08-01"}' --profiles-dir .
-```
-
-然後看:
-
-```bash
-cat /data/deploy/workspace/dagster_workspace/dbt_project/target/compiled/post_office_dbt/models/NEW_MODEL.sql
-```
-
-**確認三件事**:
-1. `{{ target_date }}` 都變成 `2026-08-01` 了
-2. `{{ ref('txn_ps_net') }}` 變成 `"DDEQDTAI"."dbo"."T_TXN_PS_NET"`
-3. `{{ source(...) }}` 變成正確的實體表名
-
-**把這段 SQL 複製到 SSMS 手動跑一次**,確認筆數合理、欄位正確。這是最快的除錯方式。
-
----
-
-## Step 5 · Reload code location
-
-Dagster UI → **Deployment → Code locations → Reload**。
+Dagster UI → **Catalog 右上角的 Reload definitions**(或 Deployment → Code locations → Reload)。
 
 新資產 `NEW_MODEL` 會出現在 `fraud_detection_models` 群組。
 
 ---
 
-## Step 6 · 驗證
+## Step 5 · 驗證
 
-1. **Assets** 頁面找到 `NEW_MODEL`,確認:
+1. **Catalog** 找到 `NEW_MODEL`,確認:
    - 群組是 `fraud_detection_models`
    - 分區是日檔(每天一格)
-   - 相依圖上游有 `txn_ps_net` 跟你用到的來源表
-2. 手動 **Materialize** 一個分區
-3. 看 Run log 裡的 `[拓撲分層]`,確認它被排在正確的層
-   (上游先跑完才輪到它)
-4. 查資料庫:`SELECT COUNT(*) FROM dbo.mrt_NEW_MODEL WHERE TABLE_DATE = '2026-08-01'`
-5. 隔天確認自動觸發有跑起來
+2. 點進去 → **Lineage** 分頁 → 切 **Upstream**,
+   確認上游有 `txn_ps_net` 跟你用到的來源表
+   (**少一條線通常代表 SQL 裡把表名寫死了**,沒用 `ref()` / `source()`)
+3. 看編譯後的 SQL:
+   `target/compiled/post_office_dbt/models/NEW_MODEL.sql`
+   確認 `{{ target_date }}` 已代成日期、`ref` / `source` 已變成實體表名。
+   **複製到 SSMS 手跑一次**,確認筆數合理——這是最快的除錯方式
+4. 手動 **Materialize** 一個分區
+5. 看 Run log 裡的 `[拓撲分層]`,確認它被排在正確的層(上游先跑完才輪到它)
+6. 查資料庫:`SELECT COUNT(*) FROM dbo.mrt_NEW_MODEL WHERE TABLE_DATE = '2026-08-01'`
+7. 隔天確認自動觸發有跑起來
 
 ### 自動觸發是怎麼發生的
 
@@ -265,12 +364,64 @@ WHERE 1=1
 [ ] config 有 alias 與 tags（含 daily_job 或 monthly_job）
 [ ] 日期用 var("target_date")
 [ ] 輸出有 TABLE_DATE 欄位
+[ ] 代碼清單走 get_config()，沒有自己複製貼上一長串 FUNC_CODE
 [ ] 用到的來源表都在 sources.yml 登記了
-[ ] 重新產生 manifest（dbt parse）
+[ ] push 到 GitLab，CI/CD pipeline 綠燈（manifest 已更新）
+[ ] Reload definitions 成功
+[ ] Lineage 分頁確認上游有接對
 [ ] 看過 target/compiled 的 SQL，變數都正確帶入
 [ ] 編譯後的 SQL 在 SSMS 跑過，筆數合理
-[ ] Reload code location 成功
 [ ] 手動 materialize 一個分區成功
 [ ] 資料庫裡查得到資料
 [ ] 隔天確認自動觸發正常
 ```
+
+---
+
+## 附註 · 手動產生 manifest 與編譯 SQL
+
+**一般不會走這個路徑**——manifest 由 GitLab CI/CD 在同步時自動產生(Step 3)。
+
+以下情況才需要手動下指令:
+
+- CI/CD pipeline 掛了,但你急著先讓 Dagster 看到新模型
+- 你在 VM4 上直接改了檔案沒有走 git(**不建議,下次同步會被蓋掉**)
+- 想在 push 之前先看編譯後的 SQL 長什麼樣
+
+### 只更新 manifest
+
+```bash
+docker run --rm \
+  -v /data/deploy/workspace/dagster_workspace/dbt_project:/app/workspace/dbt_project \
+  -w /app/workspace/dbt_project \
+  --network docker-compose_vm4-network \
+  dai/dagster:v2.6 \
+  dbt parse --profiles-dir .
+```
+
+### 編譯指定模型與日期(順便檢查 SQL 語法)
+
+```bash
+docker run --rm \
+  -v /data/deploy/workspace/dagster_workspace/dbt_project:/app/workspace/dbt_project \
+  -w /app/workspace/dbt_project \
+  --network docker-compose_vm4-network \
+  dai/dagster:v2.6 \
+  dbt compile --select NEW_MODEL --vars '{"target_date": "2026-08-01"}' --profiles-dir .
+```
+
+`dbt compile` 會**順便更新 manifest**,所以想一次做完兩件事就用這個。
+
+然後看產出:
+
+```bash
+cat /data/deploy/workspace/dagster_workspace/dbt_project/target/compiled/post_office_dbt/models/NEW_MODEL.sql
+```
+
+**確認三件事**:
+1. `{{ target_date }}` 都變成 `2026-08-01` 了
+2. `{{ ref('txn_ps_net') }}` 變成 `"DDEQDTAI"."dbo"."T_TXN_PS_NET"`
+3. `{{ get_config()[...] }}` 展開成完整的代碼清單
+
+> ⚠️ 手動跑完之後,**記得還是要把程式碼 push 上 GitLab**。
+> 只在 VM4 上改的檔案,下一次 CI/CD 同步就會被覆蓋掉。
