@@ -132,6 +132,8 @@ def build_table_assets(table_name: str, config: dict):
  
     ftp_remote_template = config.get("ftp_remote_template")
     staging_subfolder = config.get("staging_subfolder", table_name)
+    multi_part_start = config.get("multi_part_start")
+    multi_part_list = config.get("multi_part_list")
 
     use_data_rule = config.get("use_data_rule", False)
     expected_part_count = config.get("expected_part_count", 1)
@@ -229,36 +231,43 @@ def build_table_assets(table_name: str, config: dict):
         def _fetch_ftp_asset(context: AssetExecutionContext, ssh_pipes: PipesSSHClient) -> MaterializeResult:
             partition_date = context.partition_key
             formatted_date = partition_date.replace("-", "") if freq == "daily" else partition_date.replace("-", "")[:6]
- 
+
             actual_csv_name = csv_filename_template.format(date=formatted_date)
- 
-            # zip 模式跟非 zip 模式，最終落地的檔名都一樣是 actual_csv_name，
-            # 差別只在於中間有沒有多一道「下載 zip -> 解壓縮」的手續，
-            # 這道手續完全交給 fetch_ftp_remote.py 在 VM1 上處理。
+
             if encrypt_fields:
                 local_path = f"~/{staging_subfolder}/{actual_csv_name}"
             else:
                 local_path = os.path.join(in_dir, actual_csv_name)
- 
+
             command = [
                 "python3.11", "/home/bcp_runner/scripts/fetch_ftp_remote.py",
                 "--local-path", local_path,
             ]
 
-            if expected_part_count > 1:
-                # 這裡必須是 FTP 上的「外層」檔名，且必須提前把 table_name 跟 date 填好，只留 {part} 給遠端
-                multi_part_template = f"{table_name}_{{part}}_{formatted_date}.zip" if use_ftp_zip else f"{table_name}_{{part}}_{formatted_date}.csv"
+            # 只要預期數量 > 1 或者有給定明確的拆檔清單，就啟用多檔模式
+            if expected_part_count > 1 or multi_part_list:
+                # 遇到後方帶有隨機時間戳的情況，改用 prefix 模糊比對
+                multi_part_prefix = f"{table_name}_{{part}}_{formatted_date}"
+                multi_part_ext = ".zip" if use_ftp_zip else ".csv"
                 
+                # 若有明確清單，以清單長度為最終預期數量
+                actual_expected_count = expected_part_count if expected_part_count > 1 else len(multi_part_list)
+
                 command += [
-                    "--expected-part-count", str(expected_part_count),
-                    "--multi-part-template", multi_part_template
+                    "--expected-part-count", str(actual_expected_count),
+                    "--multi-part-prefix", multi_part_prefix,
+                    "--multi-part-ext", multi_part_ext,
+                    "--part-start", str(multi_part_start)
                 ]
+                
+                if multi_part_list:
+                    command += ["--part-list", ",".join(str(p) for p in multi_part_list)]
+
                 if ftp_remote_dir:
                     command += ["--ftp-remote-dir", ftp_remote_dir]
                 
-                context.log.info(f"啟動多檔合併下載：預期 {expected_part_count} 檔 -> 合併為單一 {local_path}")
+                context.log.info(f"啟動多檔合併下載：預期 {actual_expected_count} 檔 -> 合併為單一 {local_path}")
             elif ftp_remote_dir:
-                # 目錄+前綴模式：遠端檔名有 timestamp，交給 remote script 自己去 list 配對
                 formatted_prefix = ftp_remote_filename_prefix.format(date=formatted_date)
                 command += [
                     "--ftp-remote-dir", ftp_remote_dir,
@@ -269,24 +278,23 @@ def build_table_assets(table_name: str, config: dict):
                 remote_path = ftp_remote_template.format(date=formatted_date)
                 command += ["--remote-path", remote_path]
                 context.log.info(f"透過 SSH 從 FTP 下載: {remote_path} -> {local_path}")
- 
+
             if use_ftp_zip:
                 command += ["--zip-password-env-key", zip_password_env_key]
                 if zip_inner_filename:
                     command += ["--zip-inner-filename", zip_inner_filename]
- 
+
             try:
                 result = ssh_pipes.run(context=context, command=command)
             except PipesSubprocessError as e:
-                # 捕捉到我們自己定義的 99 (檔案未齊全)
                 if getattr(e, "exit_code", None) == 99:
                     context.log.info("FTP 檔案尚未到齊，本次排程安全略過 (Skip)")
                     return SkipReason("FTP 檔案尚未到齊")
-                raise # 其他非預期的系統錯誤照常報錯
+                raise 
 
             context.log.info("✅ FTP 下載完成")
             return result.get_results()
- 
+
         assets_for_this_table.append(_fetch_ftp_asset)
 
     # ==========================================
