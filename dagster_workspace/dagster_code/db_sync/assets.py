@@ -18,6 +18,7 @@ from dagster_code.assets import (
     , CONTAINER_DATA_DIR
 )
 from dagster_code.db_sync.config import DB_SYNC_MAPPING
+from dagster_code.log_utils import log_detail
 
 
 def build_db_sync_assets(table_name: str, config: dict):
@@ -98,8 +99,9 @@ def build_db_sync_assets(table_name: str, config: dict):
         partition_date = context.partition_key
         formatted_date, raw_path, _, _ = _paths(partition_date)
 
-        context.log.info(
-            f"透過 SSH 從來源 DB 撈取+解密: {source_db}.{source_table} "
+        log_detail(
+            context,
+            f"來源 DB 撈取+解密: {source_db}.{source_table} "
             f"({notify_date_col} 前綴={formatted_date}) -> {raw_path}"
         )
         result = ssh_pipes.run(
@@ -138,7 +140,7 @@ def build_db_sync_assets(table_name: str, config: dict):
         partition_date = context.partition_key
         _, raw_path, encrypted_path, _ = _paths(partition_date)
 
-        context.log.info(f"透過 SSH 遠端加密: {raw_path} -> {encrypted_path}")
+        log_detail(context, f"加密: {raw_path} -> {encrypted_path}")
         result = ssh_pipes.run(
             context=context,
             command=[
@@ -171,7 +173,7 @@ def build_db_sync_assets(table_name: str, config: dict):
         partition_date = context.partition_key
         _, _, encrypted_path, error_log_path = _paths(partition_date)
 
-        context.log.info(f"透過 SSH BCP 載入: {encrypted_path} -> {bcp_target}")
+        log_detail(context, f"BCP 載入: {encrypted_path} -> {bcp_target}")
         result = ssh_pipes.run(
             context=context,
             command=[
@@ -205,8 +207,9 @@ def build_db_sync_assets(table_name: str, config: dict):
         partition_date = context.partition_key
         _, raw_path, encrypted_path, _ = _paths(partition_date)
 
-        context.log.info(
-            f"清除明文暫存並封存: plaintext={raw_path}, encrypted={encrypted_path} -> {archive_dir}"
+        log_detail(
+            context,
+            f"清除明文暫存並封存: plaintext={raw_path} encrypted={encrypted_path} -> {archive_dir}"
         )
         result = ssh_pipes.run(
             context=context,

@@ -26,6 +26,7 @@ from dagster_dbt import DagsterDbtTranslator, DbtProject, dbt_assets
 from dagster_docker import PipesDockerClient
 from dagster_code.table_mapping import TABLE_CSV_MAPPING, SQL_TO_CSV_MAPPING
 from dagster_code.pipes_ssh_client import PipesSSHClient
+from dagster_code.log_utils import log_detail, log_detail_error
 
 # ==============================================================================
 # 0. 全域設定與資源
@@ -279,7 +280,8 @@ def build_table_assets(table_name: str, config: dict):
                 if ftp_remote_dir:
                     command += ["--ftp-remote-dir", ftp_remote_dir]
 
-                context.log.info(f"啟動多檔合併下載：預期 {actual_expected_count} 檔 -> 合併為單一 {local_path}")
+                context.log.info(f"啟動多檔合併下載：預期 {actual_expected_count} 檔")
+                log_detail(context, f"多檔合併目標: {local_path} prefix={multi_part_prefix}{multi_part_ext}")
             elif ftp_remote_dir:
                 # 目錄+前綴模式：遠端檔名有 timestamp，交給 remote script 自己去 list 配對
                 formatted_prefix = ftp_remote_filename_prefix.format(date=formatted_date)
@@ -287,11 +289,11 @@ def build_table_assets(table_name: str, config: dict):
                     "--ftp-remote-dir", ftp_remote_dir,
                     "--ftp-filename-prefix", formatted_prefix,
                 ]
-                context.log.info(f"透過 SSH 從 FTP 目錄比對下載: {ftp_remote_dir}{formatted_prefix}* -> {local_path}")
+                log_detail(context, f"FTP 目錄比對下載: {ftp_remote_dir}{formatted_prefix}* -> {local_path}")
             else:
                 remote_path = ftp_remote_template.format(date=formatted_date)
                 command += ["--remote-path", remote_path]
-                context.log.info(f"透過 SSH 從 FTP 下載: {remote_path} -> {local_path}")
+                log_detail(context, f"FTP 下載: {remote_path} -> {local_path}")
  
             if use_ftp_zip:
                 command += ["--zip-password-env-key", zip_password_env_key]
@@ -339,7 +341,7 @@ def build_table_assets(table_name: str, config: dict):
             )
             named_path = f"~/{staging_subfolder}/{actual_csv_name.replace('.csv', '_NAMED.csv')}"
     
-            context.log.info(f"透過 SSH 遠端套用檔規欄位名稱: {raw_path} -> {named_path}")
+            log_detail(context, f"套用檔規: {raw_path} -> {named_path}")
 
             data_rule_sheet = config.get("data_rule_sheet", table_name)
             result = ssh_pipes.run(
@@ -391,7 +393,7 @@ def build_table_assets(table_name: str, config: dict):
             # 這樣不管明碼是從 staging 還是 in_dir 來，下游邏輯完全不用改。
             encrypted_csv_path = os.path.join(in_dir, actual_csv_name.replace(".csv", "_ENCRYPTED.csv"))
 
-            context.log.info(f"透過 SSH 遠端加密: {raw_csv_path} -> {encrypted_csv_path}")
+            log_detail(context, f"加密: {raw_csv_path} -> {encrypted_csv_path}")
 
             result = ssh_pipes.run(
                 context=context,
@@ -510,7 +512,7 @@ def build_table_assets(table_name: str, config: dict):
                             if batch:
                                 cursor.execute(batch)
                     conn.commit()
-                context.log.warning(f"✅ SQL 執行完成，共 {len(batches)} 個批次")
+                log_detail(context, f"SQL 執行完成，共 {len(batches)} 個批次")
 
             # ==========================================
             # 1. Partition 管理（走 sqlcmd docker，直接連 DB）
@@ -584,7 +586,7 @@ def build_table_assets(table_name: str, config: dict):
                     ELSE
                         PRINT 'Partition {expire_month} 不存在，略過';
                     """)
-                    context.log.info(f"✅ 舊 Partition {expire_month} 淘汰完成")
+                    context.log.warning(f"⚠️ 舊 Partition {expire_month} 已淘汰（資料已移出正式表）")
 
             # ==========================================
             # 2. DISABLE index（走 sqlcmd docker，直接連 DB）
@@ -603,7 +605,7 @@ def build_table_assets(table_name: str, config: dict):
                 ELSE
                     PRINT 'Index {index_name} 不存在，略過';
                 """)
-                context.log.info(f"✅ Index {index_name} DISABLE 完成")
+                log_detail(context, f"Index {index_name} DISABLE 完成")
 
             # ==========================================
             # 3. BCP 匯入（透過 SSH 在 VM1 執行）
@@ -637,11 +639,12 @@ def build_table_assets(table_name: str, config: dict):
                 ELSE
                     PRINT 'Index {index_name} 不存在，略過';
                 """)
-                context.log.info(f"✅ Index {index_name} REBUILD 完成")
+                log_detail(context, f"Index {index_name} REBUILD 完成")
 
         except Exception as e:
-            error_details = str(e)
-            context.log.error(f"❌ 執行失敗:\n{error_details}")
+            # 完整錯誤可能含 SQL 語句與資料內容，只寫明細；UI 只留一句話
+            log_detail_error(context, f"入庫階段失敗: {e}")
+            context.log.error("❌ 入庫階段執行失敗，詳見明細 log 與 BCP 錯誤檔")
             raise Exception("執行失敗，請檢查錯誤日誌。")
 
         return MaterializeResult(
@@ -691,7 +694,7 @@ def build_table_assets(table_name: str, config: dict):
                 plaintext_staging_path = None
                 archived_source_path = os.path.join(in_dir, actual_csv_name)
  
-            context.log.info(f"開始封存清理: 加密/來源檔={archived_source_path}")
+            log_detail(context, f"開始封存清理: 來源={archived_source_path} 封存目錄={archive_dir}")
  
             command = [
                 "python3.11", "/home/bcp_runner/scripts/archive_cleanup_remote.py",
@@ -879,13 +882,14 @@ def build_export_assets(table_name: str, config: dict):
         if ftp_remote_path and remote_csv_path:
             if keep_local_copy:
                 context.log.warning(
-                    f"⚠️ keep_local_copy=True：解密後的明文 CSV 會同時留在 VM1 "
-                    f"（{remote_csv_path}），僅供測試，上線前請移除此設定"
+                    "⚠️ keep_local_copy=True：解密後的明文 CSV 會同時留在 VM1，"
+                    "僅供測試，上線前請移除此設定"
                 )
+                log_detail(context, f"keep_local_copy 落地路徑: {remote_csv_path}")
             else:
-                context.log.info(
-                    f"已設定 ftp_remote_path，直接送 FTP 不落地，"
-                    f"忽略 output_folder（{output_folder}）"
+                log_detail(
+                    context,
+                    f"已設定 ftp_remote_path，不落地，忽略 output_folder（{output_folder}）",
                 )
                 remote_csv_path = None
 
@@ -970,13 +974,15 @@ def get_topological_levels(models, manifest):
 
 def _run_dbt_levels(context, pipes, manifest, selected_models, partition_date, is_snapshot=False):
     levels = get_topological_levels(selected_models, manifest)
-    context.log.info(f"[拓撲分層] 共 {len(levels)} 層: {levels}")
+    context.log.info(f"[拓撲分層] 共 {len(levels)} 層")
+    log_detail(context, f"拓撲分層明細: {levels}")
 
     max_retries = 2
     retry_delay = 30
 
     for level_idx, level_models in enumerate(levels):
-        context.log.info(f"▶ 執行第 {level_idx + 1} 層: {level_models}")
+        context.log.info(f"▶ 執行第 {level_idx + 1} 層（{len(level_models)} 個模型）")
+        log_detail(context, f"第 {level_idx + 1} 層模型: {level_models}")
 
         for attempt in range(max_retries + 1):
             try:
@@ -991,7 +997,7 @@ def _run_dbt_levels(context, pipes, manifest, selected_models, partition_date, i
                     dbt_build_args.extend(["--vars", json.dumps(dbt_vars)])
 
                 full_command = ["dbt"] + dbt_build_args + ["--profiles-dir", "."]
-                context.log.info(f"交給 Docker 的指令: {' '.join(full_command)}")
+                log_detail(context, f"dbt 指令: {' '.join(full_command)}")
 
                 pipes.run(
                     command=full_command,
@@ -1018,19 +1024,29 @@ def _run_dbt_levels(context, pipes, manifest, selected_models, partition_date, i
                             "level": level_idx + 1
                         }
                     )
-                context.log.info(f"✅ 第 {level_idx + 1} 層完成: {level_models}")
+                context.log.info(f"✅ 第 {level_idx + 1} 層完成")
+                log_detail(context, f"第 {level_idx + 1} 層完成: {level_models}")
                 break
 
             except Exception as e:
                 if attempt < max_retries:
                     context.log.warning(
                         f"⚠️ 第 {level_idx + 1} 層失敗 (attempt {attempt + 1})，"
-                        f"{retry_delay} 秒後重試...\n原因: {str(e)}"
+                        f"{retry_delay} 秒後重試"
+                    )
+                    log_detail_error(
+                        context,
+                        f"第 {level_idx + 1} 層失敗 (attempt {attempt + 1}) "
+                        f"models={level_models} 原因: {e}",
                     )
                     time.sleep(retry_delay)
                 else:
                     context.log.error(
-                        f"❌ 第 {level_idx + 1} 層徹底失敗: {level_models}\n原因: {str(e)}"
+                        f"❌ 第 {level_idx + 1} 層徹底失敗，詳見明細 log"
+                    )
+                    log_detail_error(
+                        context,
+                        f"第 {level_idx + 1} 層徹底失敗 models={level_models} 原因: {e}",
                     )
                     raise e
 
@@ -1052,7 +1068,7 @@ def post_office_dbt_assets(context: AssetExecutionContext, pipes: PipesDockerCli
         keys = context.partition_keys
         if keys:
             partition_date = keys[0]
-            context.log.info(f"[Dagster -> dbt] 從清單成功解鎖日期: {partition_date}")
+            log_detail(context, f"dbt target_date = {partition_date}")
     except Exception:
         context.log.warning("⚠️ [警告] 完全未偵測到任何 Partition 資訊，將走預設流程")
 
@@ -1079,7 +1095,7 @@ def post_office_dbt_monthly_assets(context: AssetExecutionContext, pipes: PipesD
         keys = context.partition_keys
         if keys:
             partition_date = keys[0]
-            context.log.info(f"[Dagster -> dbt] 從清單成功解鎖日期: {partition_date}")
+            log_detail(context, f"dbt target_date = {partition_date}")
     except Exception:
         context.log.warning("⚠️ [警告] 完全未偵測到任何 Partition 資訊，將走預設流程")
 

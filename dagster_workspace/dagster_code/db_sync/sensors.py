@@ -11,6 +11,7 @@ from dagster import (
 )
 
 from dagster_code.sensors import _ssh_run
+from dagster_code.log_utils import log_detail, log_detail_error
 from dagster_code.db_sync.config import (
     DB_SYNC_MAPPING
     , DB_SYNC_STABLE_SECONDS
@@ -107,7 +108,8 @@ def db_sync_watcher_sensor(context):
                 watch_col, after_date, group_len,
             )
         except Exception as e:
-            context.log.error(f"❌ [{table_name}] 來源 DB 查詢失敗: {e}")
+            context.log.error(f"❌ [{table_name}] 來源 DB 查詢失敗，詳見明細 log")
+            log_detail_error(context, f"[{table_name}] 來源 DB 查詢失敗: {e}")
             continue
 
         for entry in entries:
@@ -122,9 +124,10 @@ def db_sync_watcher_sensor(context):
             prev = pending.get(file_key)
             if prev is None or prev["count"] != count:
                 if prev is not None:
-                    context.log.info(
+                    log_detail(
+                        context,
                         f"[{table_name}] {partition_date} 筆數變動中 "
-                        f"{prev['count']} -> {count},重新計時"
+                        f"{prev['count']} -> {count}，重新計時"
                     )
                 pending[file_key] = {
                     "count": count,
@@ -135,16 +138,17 @@ def db_sync_watcher_sensor(context):
 
             elapsed_stable = now - prev["stable_since"]
             if elapsed_stable < DB_SYNC_STABLE_SECONDS:
-                context.log.info(
+                log_detail(
+                    context,
                     f"[{table_name}] {partition_date} 筆數 {count} 穩定 "
-                    f"{int(elapsed_stable)}s / {DB_SYNC_STABLE_SECONDS}s,續等"
+                    f"{int(elapsed_stable)}s / {DB_SYNC_STABLE_SECONDS}s，續等"
                 )
                 continue
 
             if (now - prev["first_seen"]) > DB_SYNC_STALL_WARN_SECONDS:
                 context.log.warning(
                     f"⚠️ [{table_name}] {partition_date} 等待逾 "
-                    f"{DB_SYNC_STALL_WARN_SECONDS}s 才穩定,請確認來源批次是否異常"
+                    f"{DB_SYNC_STALL_WARN_SECONDS}s 才穩定，請確認來源批次是否異常"
                 )
 
             requests.append(RunRequest(
@@ -160,7 +164,8 @@ def db_sync_watcher_sensor(context):
             ))
             processed.add(file_key)
             pending.pop(file_key, None)
-            context.log.info(f"✅ [{table_name}] {partition_date} 筆數 {count} 已穩定,觸發同步")
+            context.log.info(f"✅ [{table_name}] {partition_date} 資料已穩定，觸發同步")
+            log_detail(context, f"[{table_name}] {partition_date} 觸發時筆數 = {count}")
 
     context.update_cursor(json.dumps({
         "processed": sorted(processed),

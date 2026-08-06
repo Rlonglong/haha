@@ -17,18 +17,35 @@ telemetry:
 python_logs:
   # 全域層級開到 INFO，這樣 UI 才看得到
   python_log_level: INFO
-  
+
   managed_python_loggers:
     - dagster.daemon
     - dagster.scheduler
     - dagster.sensor
-  
+    # ⚠️ 不要把 dagster_pipeline.detail 加進來。
+    #    加進來就會被收進 Dagster 的事件 log，明細又會跑回 UI 上，
+    #    log 分流就失效了。見 dagster_code/log_utils.py
+
   # dagster_handler_config:
   #   handlers:
   #     mySysLogHandler:
   #       class: logging.handlers.SysLogHandler
   #       level: WARNING   # ← 這個 handler 自己只收 WARNING 以上，送去 rsyslog
   #       address: ["你的rsyslog主機", 514]
+
+# ==============================================================================
+# 明細 log（路徑、遠端指令、遠端輸出）的去向
+# ------------------------------------------------------------------------------
+# UI 的 Run log 只放狀態，明細寫到獨立的 logger，由下列環境變數決定去向：
+#
+#   DAGSTER_DETAIL_SYSLOG     host:port，直接送 rsyslog（最終形態）
+#   DAGSTER_DETAIL_LOG_PATH   檔案路徑，預設
+#                             /app/workspace/dagster_home/logs/pipeline_detail.log
+#
+# 兩者都沒設就寫預設檔案路徑，由 rsyslog 的 imfile 讀走即可。
+# 這兩個變數要設在「跑 code server 的容器」的環境裡（docker-compose 的 environment）。
+# ==============================================================================
+
 
 auto_materialize:
   enabled: true

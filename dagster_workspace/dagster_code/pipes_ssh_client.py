@@ -1,3 +1,4 @@
+import os
 import subprocess
 import shlex
 import json
@@ -11,6 +12,8 @@ from dagster._core.pipes.utils import (
     open_pipes_session,
 )
 from dagster_pipes import encode_param
+
+from dagster_code.log_utils import log_detail, log_detail_warning, log_detail_error
 
 SSH_HOST     = "10.10.159.74"
 SSH_USER     = "bcp_runner"
@@ -95,7 +98,10 @@ class PipesSSHClient(PipesClient, ConfigurableResource):
                 remote_command,
             ]
  
-            context.log.info(f"[SSH → {self.ssh_host}] 執行: {' '.join(command)}")
+            # 完整指令（含所有路徑與參數）只寫明細；UI 上只留「呼叫了哪支腳本」。
+            script_name = os.path.basename(command[1]) if len(command) > 1 else str(command[0])
+            context.log.info(f"遠端執行: {script_name}")
+            log_detail(context, f"SSH → {self.ssh_host} 指令: " + " ".join(str(c) for c in command))
  
             result = subprocess.run(
                 ssh_command,
@@ -104,16 +110,26 @@ class PipesSSHClient(PipesClient, ConfigurableResource):
                 timeout=self.timeout_seconds,
             )
  
+            # 遠端 stdout 逐行回放會把路徑、筆數、甚至資料片段送上 UI，
+            # 這裡只收進 Pipes 訊息與明細 log，不進事件 log。
             for line in result.stdout.splitlines():
                 message_reader.add_line(line)
-                context.log.info(f"[SSH stdout] {line}")
- 
+                log_detail(context, f"[stdout] {line}")
+
             if result.stderr:
-                context.log.warning(f"[SSH stderr]\n{result.stderr}")
- 
+                # stderr 是排查關鍵，但同樣可能含路徑；
+                # UI 只提示「有錯誤輸出」，內容留在明細。
+                context.log.warning(f"遠端腳本 {script_name} 有錯誤輸出，詳見明細 log")
+                log_detail_warning(context, f"[stderr] {result.stderr}")
+
             if result.returncode != 0:
+                log_detail_error(
+                    context,
+                    f"SSH 遠端執行失敗 (exit {result.returncode}) "
+                    f"指令={script_name} stderr={result.stderr}",
+                )
                 raise Exception(
-                    f"SSH 遠端執行失敗 (exit {result.returncode}): {result.stderr}"
+                    f"遠端腳本 {script_name} 執行失敗 (exit {result.returncode})，詳見明細 log"
                 )
  
         return PipesClientCompletedInvocation(session)

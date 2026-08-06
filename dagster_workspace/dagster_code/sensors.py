@@ -20,6 +20,7 @@ from dagster import (
 from dagster_code.table_mapping import TABLE_CSV_MAPPING
 from dagster_code.selections import build_monthly_selection
 from dagster_code.pipes_ssh_client import SSH_HOST, SSH_USER, SSH_KEY_PATH
+from dagster_code.log_utils import log_detail, log_detail_error
 from dagster_dbt import DbtProject
 
 # ==============================================================================
@@ -190,7 +191,8 @@ def _watch_files_and_build_requests(
             try:
                 raw_entries = _ssh_run_ftp_listdir(watch_dir)
             except Exception as e:
-                context.log.error(f"❌ [{table_name}] FTP 列目錄失敗: {e}")
+                context.log.error(f"❌ [{table_name}] FTP 列目錄失敗，詳見明細 log")
+                log_detail_error(context, f"[{table_name}] FTP 列目錄失敗 dir={watch_dir}: {e}")
                 continue
             file_entries = [(e["name"], e.get("mtime"), e.get("size")) for e in raw_entries]
         else:
@@ -204,9 +206,11 @@ def _watch_files_and_build_requests(
         # [NEW] 依表格設定決定要看的副檔名：zip 來源的表看 .zip，其他表維持看 .csv
         watch_ext = ".zip" if config.get("use_ftp_zip") else ".csv"
  
-        context.log.warning(
+        # 完整檔名清單含日期、批次號等資訊，只寫明細；UI 只給數量
+        log_detail(
+            context,
             f"[{table_name}] 監控目錄: {watch_dir} "
-            f"(mode={'ftp' if use_ftp_fetch else 'local'}), "
+            f"(mode={'ftp' if use_ftp_fetch else 'local'}) "
             f"找到: {[e[0] for e in file_entries]}"
         )
  
@@ -217,7 +221,7 @@ def _watch_files_and_build_requests(
                 break
  
             if file_mtime is None or (current_time - file_mtime) < FILE_STABLE_SECONDS:
-                context.log.info(f"檔案 {filename} 似乎還在寫入中，稍後再處理...")
+                log_detail(context, f"[{table_name}] {filename} 似乎還在寫入中（未滿 {FILE_STABLE_SECONDS}s），稍後再處理")
                 continue
  
             match = re.search(date_regex, filename)
@@ -255,7 +259,7 @@ def _watch_files_and_build_requests(
             processed_keys.add(file_key)
 
         if max_files_per_tick is not None and len(requests) >= max_files_per_tick:
-            context.log.info(f"🛑 已達單次處理上限 ({max_files_per_tick} 個)，剩下的檔案將在下一次 Tick 處理。")
+            context.log.info(f"🛑 已達單次處理上限（{max_files_per_tick} 個），剩下的下一次 Tick 再處理")
             break
 
     return requests
@@ -304,7 +308,7 @@ def daily_file_watcher_sensor(context):
         # 達到上限：代表可能還有剩餘檔案。保留「舊的」時間戳。
         # 這樣下一次 tick (約 30 秒後) 就不會被 PEAK_INTERVAL_SECONDS 擋下來。
         next_ts = last_run_ts 
-        context.log.info(f"連續處理中：已達單次派發上限 ({max_files} 個)，維持時間戳以利下一次 Tick 立即接續。")
+        log_detail(context, f"已達單次派發上限（{max_files} 個），維持時間戳以利下一次 Tick 立即接續")
     else:
         # 未達上限：代表暫存區的檔案已經清空了。更新為「新的」時間戳，開始重新倒數等待。
         next_ts = now_tw.timestamp()
@@ -360,7 +364,7 @@ def monthly_file_watcher_sensor(context):
         # 達到上限：代表可能還有剩餘檔案。保留「舊的」時間戳。
         # 這樣下一次 tick (約 30 秒後) 就不會被 PEAK_INTERVAL_SECONDS 擋下來。
         next_ts = last_run_ts 
-        context.log.info(f"連續處理中：已達單次派發上限 ({max_files} 個)，維持時間戳以利下一次 Tick 立即接續。")
+        log_detail(context, f"已達單次派發上限（{max_files} 個），維持時間戳以利下一次 Tick 立即接續")
     else:
         # 未達上限：代表暫存區的檔案已經清空了。更新為「新的」時間戳，開始重新倒數等待。
         next_ts = now_tw.timestamp()
@@ -394,4 +398,5 @@ automation_sensor = AutomationConditionSensorDefinition(
 def slack_failure_alert(context):
     error_msg = context.failure_event.message
     job_name = context.dagster_run.job_name
-    context.log.error(f"🚨 [警報] 任務 {job_name} 徹底失敗！通知相關人員檢查。\n原因: {error_msg}")
+    context.log.error(f"🚨 [警報] 任務 {job_name} 徹底失敗，請通知相關人員檢查")
+    log_detail_error(context, f"job={job_name} 失敗原因: {error_msg}")
