@@ -736,6 +736,20 @@ class CustomDbtTranslator(DagsterDbtTranslator):
                 allow_nonexistent_upstream_partitions=True,
             )
 
+        if downstream_name == "ATM_A2" and upstream_name == "ATM_A2_earlyjob":
+            return TimeWindowPartitionMapping(
+                start_offset=-1,
+                end_offset=-1,
+                allow_nonexistent_upstream_partitions=True,
+            )
+
+        if downstream_name == "ATM_F" and upstream_name == "ATM_F_earlyjob":
+            return TimeWindowPartitionMapping(
+                start_offset=-1,
+                end_offset=-1,
+                allow_nonexistent_upstream_partitions=True,
+            )
+
         # 其他都用預設
         return None
 
